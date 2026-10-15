@@ -266,7 +266,9 @@ function New-DnsSnapshot($Adapter, [string[]]$Current, [switch]$RepairLocal) {
 
 function Restore-AdapterDns($Adapter, $State, [switch]$CheckOwned) {
     if ($State.DnsFamilies) {
+        $familyError = $null
         foreach ($family in $State.DnsFamilies) {
+            try {
             $inputDns = Get-DnsClientServerAddress -InterfaceIndex $Adapter.ifIndex -AddressFamily $family.Family -ErrorAction Stop
             if ($CheckOwned) {
                 $currentFamily = @($inputDns.ServerAddresses) -join ','
@@ -276,7 +278,9 @@ function Restore-AdapterDns($Adapter, $State, [switch]$CheckOwned) {
             }
             if ($family.Automatic) { Set-DnsClientServerAddress -InputObject $inputDns -ResetServerAddresses }
             else { Set-DnsClientServerAddress -InputObject $inputDns -ServerAddresses @($family.Servers) }
+            } catch { $familyError = $_; Write-Log "Pending $($family.Family) DNS restoration: $_" }
         }
+        if ($familyError) { throw $familyError }
     } elseif ($State.AutomaticDns) { Set-DnsClientServerAddress -InterfaceIndex $Adapter.ifIndex -ResetServerAddresses }
     else { Set-DnsClientServerAddress -InterfaceIndex $Adapter.ifIndex -ServerAddresses @($State.OriginalDns) }
 }

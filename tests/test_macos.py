@@ -298,4 +298,20 @@ class MacOSControllerTests(unittest.TestCase):
         self.assertTrue((self.base/'run/v6only.suspend').exists())
         self.assertFalse((self.base/'state/fake-core').exists())
 
+    def test_missing_snapshot_identity_still_cleans_core(self):
+        self.on()
+        (self.base/'state/original/service').unlink()
+        self.script('main off auto',ok=False)
+        self.assertFalse((self.base/'state/fake-core').exists())
+        self.assertEqual(self.read()['anchor'],'')
+        self.assertTrue((self.base/'state/original').exists())
+
+    def test_poisoned_snapshot_is_not_discarded_when_current_dns_is_local(self):
+        self.on()
+        (self.base/'state/original/dns').write_text('127.0.0.1\n')
+        s=self.read();s['dns']=['127.0.0.1'];self.save(s)
+        self.script('main off auto',ok=False)
+        self.assertFalse((self.base/'state/fake-core').exists())
+        self.assertTrue((self.base/'state/original').exists())
+
 if __name__ == '__main__': unittest.main()

@@ -85,5 +85,12 @@ try {
  $failed=$false;try{Invoke-V6Off -Automatic}catch{$failed=$true}
  Assert ($failed -and !$core -and (Test-Path $Snapshot)) 'unproven original settings are retained with an actionable error'
  Assert (($dns.IPv4 -join ',') -eq '127.0.0.1') 'no guessed public DNS replaces an unknown static configuration'
+ Remove-Item $Snapshot
+ $state=[pscustomobject]@{InterfaceGuid=[string]$physical.InterfaceGuid;OriginalDns=@('9.9.9.9');AppliedDns=@('202.112.128.50','2400:3200::1');DnsFamilies=@([pscustomobject]@{Family='IPv4';Automatic=$false;Servers=@('9.9.9.9')},[pscustomobject]@{Family='IPv6';Automatic=$true;Servers=@()})}
+ Write-DnsSnapshot $state
+ $dns.IPv4=@('202.112.128.50');$dns.IPv6=@('2400:3200::1');$failFamily='IPv4';$core=$true
+ $failed=$false;try{Invoke-V6Off -Automatic}catch{$failed=$true}
+ Assert ($failed -and !$core -and (Test-Path $Snapshot)) 'one DNS family failure retains recovery and still stops the core'
+ Assert ($dns.IPv6.Count -eq 0) 'other DNS family restores independently after an IPv4 failure'
  Write-Host "PASS: $checks DNS snapshot and independent cleanup checks"
 } finally {Remove-Item $temp -Recurse -Force}

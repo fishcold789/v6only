@@ -63,9 +63,12 @@ set_bypass_file() {
 
 # Restore only values still owned by this tool; preserve later user edits.
 restore() {
-    local failed=0 token dns
+    local failed=0 token dns saved_service
     if [[ -d "$ORIGINAL" ]]; then
-        SERVICE=$(cat "$ORIGINAL/service")
+        if saved_service=$(cat "$ORIGINAL/service") && [[ -n "$saved_service" ]]; then SERVICE="$saved_service";
+        else failed=1; fi
+        # An invalid snapshot remains pending even if DNS was changed again.
+        if [[ ! -f "$ORIGINAL/dns" ]] || grep -Eq '^(127\.|::1$|0\.0\.0\.0$|::$)' "$ORIGINAL/dns"; then failed=1; fi
         if dns=$(current_dns); then
             if [[ "$dns" == "$(desired_dns)" || "$dns" == $'202.112.128.50\n202.112.128.51\n2400:3200::1' ]]; then
                 if grep -Eq '^(127\.|::1$|0\.0\.0\.0$|::$)' "$ORIGINAL/dns"; then
