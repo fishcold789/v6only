@@ -42,7 +42,7 @@ func TestUnansweredUDPIsNotReplayedAtAnotherDestination(t *testing.T) {
 	}
 	defer l.Close()
 	_, port, _ := net.SplitHostPort(l.LocalAddr().String())
-	r := New(Config{FamilyTimeoutMS: 100}, nil)
+	r := New(Config{FamilyTimeoutMS: 100, AllowIPv4Fallback: true}, nil)
 	defer r.Close()
 	r.LookupOverride = func(context.Context, string) (Result, error) { return dual(), nil }
 	var ipv4 atomic.Int32

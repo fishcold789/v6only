@@ -50,6 +50,9 @@
                 <RadioButton android:id="@+id/mode_auto" style="@style/ModeButton" android:text="开机启动"/>
                 <RadioButton android:id="@+id/mode_manual" style="@style/ModeButton" android:text="手动启动"/>
             </RadioGroup>
+            <CheckBox android:id="@+id/allow_ipv4_fallback" android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:minHeight="48dp" android:text="IPv6 失败时允许 IPv4 回退" android:textColor="@color/ink" android:layout_marginTop="12dp"/>
+            <TextView style="@style/BodyText" android:textSize="13sp" android:text="默认关闭。开启后可能产生 IPv4 计费流量。"/>
             <TextView android:id="@+id/mode_description" style="@style/BodyText" android:textSize="13sp" android:layout_marginTop="13dp"/>
         </LinearLayout>
 

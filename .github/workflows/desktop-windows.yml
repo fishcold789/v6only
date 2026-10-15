@@ -26,7 +26,10 @@ jobs:
           if($LASTEXITCODE -ne 0){throw 'Alternate IPv6 CDN regression failed'}
       - name: Verify desktop retry on Windows PowerShell 5.1
         shell: powershell
-        run: ./windows/test-desktop-retry.ps1
+        run: |
+          ./windows/test-desktop-retry.ps1
+          ./windows/test-dns-recovery.ps1
+          ./windows/test-process.ps1
       - name: Build desktop, service and MSI
         shell: pwsh
         run: |

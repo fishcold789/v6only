@@ -50,6 +50,8 @@ jobs:
         shell: pwsh
         run: |
           ./windows/test.ps1
+          ./windows/test-dns-recovery.ps1
+          ./windows/test-process.ps1
           ./windows/test-adapter-wait.ps1
           ./windows/test-desktop-retry.ps1
       - name: Disposable VM actual Wintun and failure recovery
@@ -139,6 +141,9 @@ jobs:
           for f in macos/*.sh; do
             echo "== $f"; shellcheck -S warning "$f" || exit 1
           done
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - run: node --check desktop/ui/app.js && node --test desktop/tests/*.test.cjs
       - name: macOS 控制器回归测试（模拟系统命令，不修改 runner 网络）
         run: python3 -m unittest discover -s tests -v
 

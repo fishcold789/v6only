@@ -6,6 +6,16 @@ DESKTOP_UID="${1:?Missing desktop UID}"
 INSTALL_MODE="${2:-enable}"
 [[ "$INSTALL_MODE" == enable || "$INSTALL_MODE" == pause ]] || { echo "Invalid install mode" >&2;exit 1; }
 SRC=$(cd "$(dirname "$0")" && pwd)
+# Read the existing loopback proxy before stopping any installed service.
+# shellcheck source=macos/v6-common.sh
+source "$SRC/v6-common.sh"
+if local_proxy_active; then
+ proxy_endpoint=$(local_proxy_endpoint)
+ if ! /usr/bin/curl --proxy "http://$proxy_endpoint" --noproxy '' --silent --show-error --head --connect-timeout 5 --max-time 15 https://chatgpt.com/ -o /dev/null; then
+  echo "本机代理 $proxy_endpoint 不可用，保留现有后台服务。" >&2
+  exit 1
+ fi
+fi
 LIB=/usr/local/lib/v6only
 STATE=/var/db/v6only
 mkdir -p "$STATE/backups" /usr/local/lib

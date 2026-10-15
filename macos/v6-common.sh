@@ -26,7 +26,7 @@ die() { printf 'v6only: %s\n' "$*" >&2; return 1; }
 require_root() { [[ $EUID -eq 0 ]] || die '需要管理员权限，请使用 sudo。'; }
 desired_dns() { printf '%s\n' "${DNS_SERVERS[@]}"; }
 desired_resolver() { printf 'nameserver %s\n' "${CAMPUS_DNS[@]}"; }
-rules_signature() { printf '%s\n' "$IFACE"; cksum < "$V6_DIR/anchor-v6only"; cksum < "$V6_DIR/v6core"; }
+rules_signature() { printf '%s\n' "$IFACE"; cksum < "$V6_DIR/anchor-v6only"; cksum < "$V6_DIR/v6core"; if [[ -f "$STATE_DIR/allow-ipv4-fallback.flag" ]]; then printf 'fallback\n'; fi; }
 
 # Query this network service, not scutil's first (possibly VPN) resolver.
 current_dns() {
@@ -54,7 +54,25 @@ pf_active() {
     actual=$(pfctl -a "$PF_ANCHOR" -sr 2>/dev/null) || return 1
     [[ "$actual" == "$(cat "$STATE_DIR/pf.expected")" ]]
 }
+local_proxy_active() {
+    local kind value server expected=''
+    for kind in webproxy securewebproxy socksfirewallproxy; do
+        value=$(networksetup -get"$kind" "$SERVICE") || return 1
+        printf '%s\n' "$value" | grep -Fxq 'Enabled: Yes' || return 1
+        printf '%s\n' "$value" | grep -Fxq 'Port: 7890' || return 1
+        server=$(printf '%s\n' "$value" | sed -n 's/^Server: //p')
+        case "$server" in ::1|127.0.0.1) ;; *) return 1;; esac
+        [[ -z "$expected" || "$expected" == "$server" ]] || return 1
+        expected="$server"
+    done
+}
+local_proxy_endpoint() {
+    local server
+    server=$(networksetup -getwebproxy "$SERVICE" | sed -n 's/^Server: //p')
+    if [[ "$server" == ::1 ]]; then printf '[::1]:7890\n'; else printf '127.0.0.1:7890\n'; fi
+}
 proxies_paused() {
+    local_proxy_active && return 0
     local kind
     for kind in webproxy securewebproxy socksfirewallproxy; do
         networksetup -get"$kind" "$SERVICE" | grep -q '^Enabled: No' || return 1

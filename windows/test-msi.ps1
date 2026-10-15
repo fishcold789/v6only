@@ -47,6 +47,13 @@ try{
  $app=Start-Process $gui.FullName -PassThru;Start-Sleep 5;if($app.HasExited){throw 'Desktop GUI exited during launch'};Stop-Process $app.Id -Force
  # Exercise actual Wintun global capture. Hosted VM has no external IPv6;
  # successful connection to a literal IPv4 proves the v4-only path remains usable.
+ Write-Host 'CHECK: strict default preserves an IPv4-only physical network'
+ RPC @{action='enable'}|Out-Null
+ $strict=RPC @{action='status'}
+ if($strict.allow_ipv4_fallback){throw 'Fallback must default to disabled'}
+ if(!($strict.ipv6_interface -match 'inet6 [23][0-9a-fA-F]{3}:') -and $strict.enabled){throw 'Strict mode took over an IPv4-only network'}
+ Write-Host 'CHECK: explicitly opt in to IPv4 fallback for the hosted VM'
+ RPC @{action='set_fallback';allow_fallback=$true}|Out-Null
  Write-Host 'CHECK: enable forwarding'
  RPC @{action='enable'}|ConvertTo-Json -Depth 12|Set-Content "$out/enabled.json"
  if(!(RPC @{action='status'}).enabled){throw 'Network controller did not enable'}

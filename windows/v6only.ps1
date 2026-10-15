@@ -71,27 +71,39 @@ function Test-CoreActive {
         $saved = Get-Content $CoreState -Raw | ConvertFrom-Json
         $process = Get-Process -Id $saved.Pid -ErrorAction Stop
         if ($process.StartTime.ToUniversalTime().Ticks -ne $saved.StartTicks) { return $false }
+        if ($Desktop -and $saved.NetworkSignature -ne (Get-PhysicalNetworkSignature (Get-ActiveAdapter))) { return $false }
         $health = Invoke-RestMethod -Uri 'http://127.0.0.1:17890/health' -TimeoutSec 2
         $tun = Get-NetAdapter -Name 'v6only-tun' -ErrorAction Stop
         $routes = @(Get-NetRoute -InterfaceIndex $tun.ifIndex -ErrorAction Stop)
-        return $health.policy -eq 'ipv6-only-unless-no-aaaa' -and
+        return $health.policy -in @('ipv6-only-unless-no-aaaa','ipv6-preferred-with-ipv4-fallback') -and
             @($routes | Where-Object DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1','::/1','8000::/1')).Count -eq 4
     } catch { return $false }
 }
 
+function Get-PhysicalNetworkSignature($Adapter) {
+    if (-not $Adapter) { return '' }
+    $addresses = @(Get-NetIPAddress -InterfaceIndex $Adapter.ifIndex -ErrorAction Stop | ForEach-Object { $_.IPAddress } | Sort-Object)
+    $gateways = @(Get-NetRoute -InterfaceIndex $Adapter.ifIndex -ErrorAction Stop | Where-Object DestinationPrefix -in @('0.0.0.0/0','::/0') | ForEach-Object { $_.NextHop } | Sort-Object)
+    return ([string]$Adapter.InterfaceGuid) + '|' + ($addresses -join ',') + '|' + ($gateways -join ',') + '|' + (@(Get-AdapterDns $Adapter) -join ',')
+}
+
 function Stop-V6Core {
+    $stopError = $null
+    try {
     if (Test-Path $CoreState) {
         $saved = Get-Content $CoreState -Raw | ConvertFrom-Json
         $process = Get-Process -Id $saved.Pid -ErrorAction SilentlyContinue
         if ($process -and $process.StartTime.ToUniversalTime().Ticks -eq $saved.StartTicks -and $process.ProcessName -eq 'v6core') {
-            Stop-Process -Id $saved.Pid -Force
-            Wait-Process -Id $saved.Pid -Timeout 10 -ErrorAction SilentlyContinue
+            Stop-Process -InputObject $process -Force -ErrorAction SilentlyContinue
+            $process.WaitForExit(10000) | Out-Null
         }
     }
+    } catch { $stopError = $_; Write-Log "Core state/process cleanup: $_`n$($_.ScriptStackTrace)" }
     # Routes belong exclusively to the named adapter owned by this program.
     $tun = Get-NetAdapter -Name 'v6only-tun' -ErrorAction SilentlyContinue
     if ($tun) { Get-NetRoute -InterfaceIndex $tun.ifIndex -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue }
     Remove-Item $CoreReady,$CoreState -Force -ErrorAction SilentlyContinue
+    if ($stopError) { throw $stopError }
 }
 
 function Wait-ForwardingAdapter([string]$Name) {
@@ -111,6 +123,36 @@ function Wait-ForwardingAdapter([string]$Name) {
     throw "Forwarding adapter $Name is unavailable after driver start"
 }
 
+function Invoke-BoundedProcess([string]$File, [string]$Arguments, [string]$OutputPath, [string]$ErrorPath, [int]$TimeoutMs = 15000) {
+    # Own the native process handle from creation. Start-Process's redirected
+    # Process objects can return a null ExitCode on Windows PowerShell 5.1.
+    $info = New-Object System.Diagnostics.ProcessStartInfo
+    $info.FileName=$File; $info.Arguments=$Arguments; $info.UseShellExecute=$false
+    $info.CreateNoWindow=$true; $info.RedirectStandardOutput=$true; $info.RedirectStandardError=$true
+    $process = [Diagnostics.Process]::Start($info)
+    try {
+        $outputTask=$process.StandardOutput.ReadToEndAsync()
+        $errorTask=$process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($TimeoutMs)) {
+            $process.Kill()
+            $process.WaitForExit()
+            throw 'Physical DNS/HTTPS probe timed out before network takeover'
+        }
+        [IO.File]::WriteAllText($OutputPath, $outputTask.GetAwaiter().GetResult())
+        [IO.File]::WriteAllText($ErrorPath, $errorTask.GetAwaiter().GetResult())
+        return $process.ExitCode
+    } finally { $process.Dispose() }
+}
+
+function Test-PhysicalForwarding($Adapter, [string[]]$Upstream, [string]$Supplement) {
+    $arguments = '--interface "' + $Adapter.Name + '" --dns ' + ($Upstream -join ',') + ' --ipv6-dns ' + $Supplement + ' --probe https://www.microsoft.com/'
+    if (Test-Path (Join-Path (Split-Path $Marker) 'allow-ipv4-fallback.flag')) { $arguments += ' --allow-ipv4-fallback' }
+    $exitCode = Invoke-BoundedProcess (Join-Path $CoreDir 'v6core.exe') $arguments `
+        (Join-Path (Split-Path $Marker) 'preflight.json') (Join-Path (Split-Path $Marker) 'preflight-error.log')
+    if ($exitCode -ne 0) { throw "Physical DNS/HTTPS probe failed ($exitCode) before network takeover; see preflight-error.log" }
+
+}
+
 function Start-V6Core($Adapter) {
     if (Test-CoreActive) { return }
     foreach ($file in @('v6core.exe','wintun.dll')) {
@@ -119,15 +161,19 @@ function Start-V6Core($Adapter) {
     Stop-V6Core
     $args = '--interface "' + $Adapter.Name + '" --device v6only-tun --dns 202.112.128.50,202.112.128.51 --ready "' + $CoreReady + '"'
     if ($Desktop) {
-        $upstream = @($state.OriginalDns | Where-Object { $_ -ne '127.0.0.1' -and $_ -ne '::1' })
+        $upstream = @($ManagedDns | Where-Object { -not (Test-LocalDns @($_)) })
         if (-not $upstream) { $upstream = @('223.5.5.5','223.6.6.6') }
         $supplement='223.5.5.5,223.6.6.6'
         if(Get-NetIPAddress -InterfaceIndex $Adapter.ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue|Where-Object IPAddress -Match '^[23][0-9a-fA-F]{3}:'){$supplement='2400:3200::1,2400:3200:baba::1,223.5.5.5,223.6.6.6'}
-        $args = '--interface "' + $Adapter.Name + '" --device v6only-tun --dns ' + ($upstream -join ',') + ' --ipv6-dns ' + $supplement + ' --chatgpt-ipv4 --dns-listen 127.0.0.1:53 --stats-db "' + (Join-Path (Split-Path $Marker) 'traffic.sqlite') + '" --ready "' + $CoreReady + '"'
+        Test-PhysicalForwarding $Adapter $upstream $supplement
+        $args = '--interface "' + $Adapter.Name + '" --device v6only-tun --dns ' + ($upstream -join ',') + ' --ipv6-dns ' + $supplement + ' --chatgpt-ipv4 --stats-db "' + (Join-Path (Split-Path $Marker) 'traffic.sqlite') + '" --ready "' + $CoreReady + '"'
     }
+    if (Test-Path (Join-Path (Split-Path $Marker) 'allow-ipv4-fallback.flag')) { $args += ' --allow-ipv4-fallback' }
     $process = Start-Process -FilePath (Join-Path $CoreDir 'v6core.exe') -ArgumentList $args -WorkingDirectory $CoreDir -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path (Split-Path $Marker) 'core.log') -RedirectStandardError (Join-Path (Split-Path $Marker) 'core-error.log')
-    @{Pid=$process.Id;StartTicks=$process.StartTime.ToUniversalTime().Ticks} | ConvertTo-Json | Set-Content $CoreState
+    $null = $process.Handle
+    if ($process.HasExited) { throw 'Forwarding core exited before process state capture; see core-error.log' }
+    @{Pid=$process.Id;StartTicks=$process.StartTime.ToUniversalTime().Ticks;NetworkSignature=(Get-PhysicalNetworkSignature $Adapter)} | ConvertTo-Json | Set-Content $CoreState
     for ($i=0; $i -lt 40; $i++) {
         if (Test-Path $CoreReady) { break }
         if ($process.HasExited) { throw 'Forwarding core exited during start' }
@@ -192,8 +238,78 @@ function Get-AdapterDns($Adapter) {
         Where-Object { $_ } | Select-Object -Unique)
 }
 
+function Write-DnsSnapshot($State) {
+    # Same-volume replacement leaves either the previous or the complete new JSON.
+    $temp = "$Snapshot.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        $State | ConvertTo-Json -Depth 8 | Set-Content $temp -Encoding UTF8
+        if (Test-Path $Snapshot) { [IO.File]::Replace($temp, $Snapshot, "$Snapshot.previous") }
+        else { [IO.File]::Move($temp, $Snapshot) }
+    } finally { Remove-Item $temp,"$Snapshot.previous" -Force -ErrorAction SilentlyContinue }
+}
+
+function Test-LocalDns([string[]]$Dns) {
+    foreach ($value in $Dns) {
+        $ip = $null
+        if ([net.ipaddress]::TryParse($value, [ref]$ip) -and
+            ([net.ipaddress]::IsLoopback($ip) -or $ip.Equals([net.ipaddress]::Any) -or $ip.Equals([net.ipaddress]::IPv6Any))) { return $true }
+    }
+    return $false
+}
+
+function New-DnsSnapshot($Adapter, [string[]]$Current, [switch]$RepairLocal) {
+    $guid = ([guid]$Adapter.InterfaceGuid).ToString('B')
+    $families = @(foreach ($family in @('IPv4','IPv6')) {
+        $service = if ($family -eq 'IPv4') { 'Tcpip' } else { 'Tcpip6' }
+        $registry = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$service\Parameters\Interfaces\$guid" -ErrorAction Stop
+        $static = @(([string]$registry.NameServer -split '[,;\s]+') | Where-Object { $_ })
+        $automatic = $static.Count -eq 0
+        if ((Test-Path $Marker) -and (Test-LegacyDns $Current)) { $automatic = $true }
+        if ($RepairLocal -and (Test-LocalDns $static)) {
+            # A DHCP address configuration alone does not establish DNS intent.
+            # Require actual non-local DHCP DNS evidence on this same interface.
+            $leaseDns = @(([string]$registry.DhcpNameServer -split '[,;\s]+') | Where-Object { $_ })
+            if ($family -ne 'IPv4' -or $registry.EnableDHCP -ne 1 -or -not $leaseDns -or (Test-LocalDns $leaseDns)) {
+                throw "Cannot safely recover $family local DNS on $($Adapter.Name); snapshot retained. Configure the original DNS manually."
+            }
+            $automatic = $true
+            Write-Log "Recovered contaminated $family DNS snapshot using DHCP evidence on $guid"
+        }
+        [pscustomobject]@{Family=$family;Automatic=$automatic;Servers=$static}
+    })
+    [pscustomobject]@{
+        SchemaVersion=2;InterfaceGuid=[string]$Adapter.InterfaceGuid
+        AutomaticDns=(@($families | Where-Object { -not $_.Automatic }).Count -eq 0)
+        OriginalDns=@($Current | Where-Object { -not (Test-LocalDns @($_)) })
+        DnsFamilies=$families;AppliedDns=@($ManagedDns)
+    }
+}
+
+function Restore-AdapterDns($Adapter, $State, [switch]$CheckOwned) {
+    if ($State.DnsFamilies) {
+        $familyError = $null
+        foreach ($family in $State.DnsFamilies) {
+            try {
+            $inputDns = Get-DnsClientServerAddress -InterfaceIndex $Adapter.ifIndex -AddressFamily $family.Family -ErrorAction Stop
+            if ($CheckOwned) {
+                $currentFamily = @($inputDns.ServerAddresses) -join ','
+                $expected = @($State.AppliedDns | Where-Object { ($_ -match ':') -eq ($family.Family -eq 'IPv6') }) -join ','
+                $previous = @($State.PreviousAppliedDns | Where-Object { ($_ -match ':') -eq ($family.Family -eq 'IPv6') }) -join ','
+                if ($currentFamily -ne $expected -and $currentFamily -ne $previous) { continue }
+            }
+            if ($family.Automatic) { Set-DnsClientServerAddress -InputObject $inputDns -ResetServerAddresses }
+            else { Set-DnsClientServerAddress -InputObject $inputDns -ServerAddresses @($family.Servers) }
+            } catch { $familyError = $_; Write-Log "Pending $($family.Family) DNS restoration: $_" }
+        }
+        if ($familyError) { throw $familyError }
+    } elseif ($State.AutomaticDns) { Set-DnsClientServerAddress -InterfaceIndex $Adapter.ifIndex -ResetServerAddresses }
+    else { Set-DnsClientServerAddress -InterfaceIndex $Adapter.ifIndex -ServerAddresses @($State.OriginalDns) }
+}
+
 function Test-Forwarding {
-    foreach ($url in @('https://gw.buaa.edu.cn/','https://www.bilibili.com/')) {
+
+    $urls = if ($Desktop) { @('https://www.microsoft.com/') } else { @('https://gw.buaa.edu.cn/','https://www.bilibili.com/') }
+    foreach ($url in $urls) {
         $request = [System.Net.HttpWebRequest]::Create($url)
         $request.Proxy = $null
         $request.Method = 'HEAD'
@@ -215,16 +331,43 @@ function Invoke-V6On {
         return
     }
     if (-not $adapter) { throw 'No active physical network adapter' }
-    if ($Desktop) { $script:ManagedDns = @('127.0.0.1') }
     $v6addr = Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue |
         Where-Object IPAddress -match '^[23][0-9a-fA-F]{3}:' | Select-Object -First 1
-    if (-not $v6addr -and -not $Desktop) { Write-Log "no global IPv6 on $($adapter.Name)"; return }
+    if (-not $v6addr -and -not (Test-Path (Join-Path (Split-Path $Marker) 'allow-ipv4-fallback.flag'))) {
+        if ((Test-Path $Snapshot) -or (Test-Path $CoreState)) { Invoke-V6Off -Automatic }
+        Write-Log "Waiting for global IPv6 on $($adapter.Name); system network preserved"
+        return
+    }
     $state = if (Test-Path $Snapshot) { Get-Content $Snapshot -Raw | ConvertFrom-Json } else { $null }
     if ($state -and $state.InterfaceGuid -ne [string]$adapter.InterfaceGuid) {
         Invoke-V6Off -Automatic
+        if (Test-Path $Snapshot) { throw 'Original interface still needs DNS restoration; refusing to overwrite its snapshot.' }
         $state = $null
     }
     $current = @(Get-AdapterDns $adapter)
+    if ($state -and (Test-LocalDns $current) -and -not (Test-LocalDns @($state.OriginalDns)) -and
+        ($current -join ',') -eq ($state.AppliedDns -join ',')) {
+        Restore-AdapterDns $adapter $state
+        $current = @(Get-AdapterDns $adapter)
+    }
+    # Repair old poisoned snapshots before any new takeover. With no snapshot,
+    # do not assume a third-party local DNS listener belongs to V6Only unless
+    # matching DHCP evidence permits a safe recovery.
+    if (($state -and (Test-LocalDns @($state.OriginalDns))) -or (-not $state -and (Test-LocalDns $current))) {
+        $repair = New-DnsSnapshot $adapter $current -RepairLocal
+        Write-DnsSnapshot $repair
+        Restore-AdapterDns $adapter $repair
+        $current = @(Get-AdapterDns $adapter)
+        $repair.OriginalDns = $current
+        Write-DnsSnapshot $repair
+        $state = $repair
+    }
+    if ($Desktop) {
+        # TUN intercepts DNS while active. Physical resolvers remain usable if
+        # the process crashes, just as on macOS; never install loopback DNS.
+        $script:ManagedDns = @($current | Where-Object { -not (Test-LocalDns @($_)) })
+        if (-not $ManagedDns) { throw 'Waiting for physical DNS servers' }
+    }
     $udp = Get-NetFirewallRule -DisplayName 'v6only-block-external-dns' -ErrorAction SilentlyContinue
     $tcp = Get-NetFirewallRule -DisplayName 'v6only-block-external-dns-tcp' -ErrorAction SilentlyContinue
     if ($state -and ($current -join ',') -eq ($ManagedDns -join ',') -and
@@ -234,38 +377,33 @@ function Invoke-V6On {
     }
     New-Item -ItemType Directory -Force -Path (Split-Path $Marker) | Out-Null
     if (-not $state) {
-        $guid = ([guid]$adapter.InterfaceGuid).ToString('B')
-        $registry = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$guid" -ErrorAction SilentlyContinue
-        $registry6 = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\$guid" -ErrorAction SilentlyContinue
-        $state = [pscustomobject]@{
-            InterfaceGuid = [string]$adapter.InterfaceGuid
-            AutomaticDns = (([string]::IsNullOrWhiteSpace($registry.NameServer) -and [string]::IsNullOrWhiteSpace($registry6.NameServer)) -or
-                ((Test-Path $Marker) -and (Test-LegacyDns $current)))
-            OriginalDns = $current
-            AppliedDns = $ManagedDns
-        }
-        $state | ConvertTo-Json | Set-Content $Snapshot -Encoding UTF8
+        $state = New-DnsSnapshot $adapter $current
+        Write-DnsSnapshot $state
     }
     $state | Add-Member -NotePropertyName PreviousAppliedDns -NotePropertyValue @($state.AppliedDns) -Force
     $state.AppliedDns = $ManagedDns
-    $state | ConvertTo-Json | Set-Content $Snapshot -Encoding UTF8
+    Write-DnsSnapshot $state
     try {
         Start-V6Core $adapter
-        Set-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -ServerAddresses $ManagedDns
+        if (-not $Desktop) { Set-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -ServerAddresses $ManagedDns }
         foreach ($protocol in @('UDP','TCP')) {
             $name = if ($protocol -eq 'UDP') { 'v6only-block-external-dns' } else { 'v6only-block-external-dns-tcp' }
             Get-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+            $blocked = @($BlockedDnsV4 | Where-Object { -not $Desktop -or $_ -notin $ManagedDns })
+            if (-not $blocked) { continue }
             New-NetFirewallRule -DisplayName $name -Direction Outbound -Action Block `
-                -Protocol $protocol -RemotePort 53 -RemoteAddress $BlockedDnsV4 `
+                -Protocol $protocol -RemotePort 53 -RemoteAddress $blocked `
                 -InterfaceAlias $adapter.Name -Profile Any | Out-Null
         }
         if ((@(Get-AdapterDns $adapter) -join ',') -ne ($ManagedDns -join ',')) { throw 'DNS readback mismatch' }
         New-Item -ItemType File -Force -Path $Marker | Out-Null
-        if (-not $Desktop) { Test-Forwarding }
+        Test-Forwarding
         Remove-Item $SuspendFlg -Force -ErrorAction SilentlyContinue
         Write-Log "campus configuration applied ($why)"
     } catch {
-        Invoke-V6Off -Automatic
+        $startupError = $_
+        Write-Log "Startup error: $startupError`n$($startupError.ScriptStackTrace)"
+        try { Invoke-V6Off -Automatic } catch { Write-Log "Rollback error: $_`n$($_.ScriptStackTrace)" }
         if ($Desktop) {
             # Keep the user's enabled state, but give a transient startup failure
             # time to recover before the service's next takeover attempt.
@@ -274,20 +412,29 @@ function Invoke-V6On {
         } else {
             '' | Set-Content $SuspendFlg -Encoding UTF8
         }
-        throw
+        throw $startupError
     }
     if (-not $Watch) { Write-Host '转发已启用。' }
 }
 
 function Invoke-V6Off([switch]$Automatic) {
+    $restoreError = $null
+    try {
     if (Test-Path $Snapshot) {
         $state = Get-Content $Snapshot -Raw | ConvertFrom-Json
         $adapter = Get-NetAdapter | Where-Object { [string]$_.InterfaceGuid -eq $state.InterfaceGuid } | Select-Object -First 1
         if (-not $adapter) { throw 'Original interface is unavailable; keeping snapshot for restoration.' }
+        if (Test-LocalDns @($state.OriginalDns)) {
+            $repaired = New-DnsSnapshot $adapter @(Get-AdapterDns $adapter) -RepairLocal
+            $repaired.AppliedDns = $state.AppliedDns
+            $repaired | Add-Member PreviousAppliedDns @($state.PreviousAppliedDns) -Force
+            Write-DnsSnapshot $repaired
+            $state = $repaired
+        }
         $current = @(Get-AdapterDns $adapter) -join ','
-        if ($current -eq ($state.AppliedDns -join ',') -or $current -eq ($state.PreviousAppliedDns -join ',')) {
-            if ($state.AutomaticDns) { Set-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -ResetServerAddresses }
-            else { Set-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -ServerAddresses @($state.OriginalDns) }
+        if ($state.DnsFamilies) { Restore-AdapterDns $adapter $state -CheckOwned }
+        elseif ($current -eq ($state.AppliedDns -join ',') -or $current -eq ($state.PreviousAppliedDns -join ',')) {
+            Restore-AdapterDns $adapter $state
         }
     } elseif (Test-Path $Marker) {
         # Legacy releases did not save a snapshot. Reset only their exact DNS profile.
@@ -295,33 +442,43 @@ function Invoke-V6Off([switch]$Automatic) {
             $dns = @(Get-AdapterDns $adapter)
             if (Test-LegacyDns $dns) {
                 Set-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -ResetServerAddresses
+            } elseif (Test-LocalDns $dns) {
+                $repair = New-DnsSnapshot $adapter $dns -RepairLocal
+                Write-DnsSnapshot $repair
+                Restore-AdapterDns $adapter $repair
             }
         }
     }
-    Stop-V6Core
-    Get-NetFirewallRule -DisplayName 'v6only-block-external-dns*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
-    Remove-Item $Marker,$Snapshot -Force -ErrorAction SilentlyContinue
+    } catch { $restoreError = $_; Write-Log "DNS restore pending: $_`n$($_.ScriptStackTrace)" }
+    # Every cleanup step runs even if the original interface is absent or the
+    # snapshot is unreadable. Failed restoration keeps the recovery information.
+    try { Stop-V6Core } catch { if (-not $restoreError) { $restoreError = $_ }; Write-Log "Core cleanup failed: $_" }
+    try { Get-NetFirewallRule -DisplayName 'v6only-block-external-dns*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule }
+    catch { if (-not $restoreError) { $restoreError = $_ }; Write-Log "Firewall cleanup failed: $_" }
+    Remove-Item $Marker -Force -ErrorAction SilentlyContinue
+    if (-not $restoreError) { Remove-Item $Snapshot -Force -ErrorAction SilentlyContinue }
     if (-not $Automatic) {
         $minutes = if ($Suspend) { [int]$Suspend } else { 30 }
         New-Item -ItemType Directory -Force -Path (Split-Path $SuspendFlg) | Out-Null
         (Get-Date).AddMinutes($minutes).ToString('o') | Set-Content $SuspendFlg -Encoding UTF8
     }
     Write-Log 'campus configuration removed'
+    if ($restoreError) { throw $restoreError }
 }
 
-function Test-Suspended([string]$path) {
+function Test-Suspended([string]$path, [switch]$ReadOnly) {
     if (-not (Test-Path $path)) { return $false }
     $until = Get-Content $path -Raw
     # Older desktop releases wrote an empty marker after startup failures.
     # Manual desktop disable removes enabled.flag; timed manual pauses still
     # use a valid timestamp and must retain their original meaning.
     if ($Desktop -and [string]::IsNullOrWhiteSpace($until)) {
-        Remove-Item $path -Force
+        if (-not $ReadOnly) { Remove-Item $path -Force }
         return $false
     }
     try {
         if ((Get-Date) -ge [datetime]::Parse($until.Trim())) {
-            Remove-Item $path -Force
+            if (-not $ReadOnly) { Remove-Item $path -Force }
             return $false
         }
     } catch { return $true }
