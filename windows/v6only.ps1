@@ -145,11 +145,21 @@ function Invoke-BoundedProcess([string]$File, [string]$Arguments, [string]$Outpu
 }
 
 function Test-PhysicalForwarding($Adapter, [string[]]$Upstream, [string]$Supplement) {
-    $arguments = '--interface "' + $Adapter.Name + '" --dns ' + ($Upstream -join ',') + ' --ipv6-dns ' + $Supplement + ' --probe https://www.microsoft.com/'
-    if (Test-Path (Join-Path (Split-Path $Marker) 'allow-ipv4-fallback.flag')) { $arguments += ' --allow-ipv4-fallback' }
-    $exitCode = Invoke-BoundedProcess (Join-Path $CoreDir 'v6core.exe') $arguments `
-        (Join-Path (Split-Path $Marker) 'preflight.json') (Join-Path (Split-Path $Marker) 'preflight-error.log')
-    if ($exitCode -ne 0) { throw "Physical DNS/HTTPS probe failed ($exitCode) before network takeover; see preflight-error.log" }
+    # Independent HTTPS origins prevent a single IPv6/CDN outage from disabling
+    # an otherwise healthy network. Every attempt retains the selected policy.
+    $lastError = ''
+    foreach ($url in @('https://www.bilibili.com/','https://www.microsoft.com/')) {
+        $arguments = '--interface "' + $Adapter.Name + '" --dns ' + ($Upstream -join ',') + ' --ipv6-dns ' + $Supplement + ' --probe ' + $url
+        if (Test-Path (Join-Path (Split-Path $Marker) 'allow-ipv4-fallback.flag')) { $arguments += ' --allow-ipv4-fallback' }
+        try {
+            $exitCode = Invoke-BoundedProcess (Join-Path $CoreDir 'v6core.exe') $arguments `
+                (Join-Path (Split-Path $Marker) 'preflight.json') (Join-Path (Split-Path $Marker) 'preflight-error.log') 12000
+            if ($exitCode -eq 0) { return }
+            $lastError = "exit $exitCode"
+        } catch { $lastError = $_.Exception.Message }
+        Write-Log "Physical HTTPS check failed for ${url}: $lastError"
+    }
+    throw "Physical DNS/HTTPS checks failed before network takeover: $lastError; see preflight-error.log"
 
 }
 
@@ -308,18 +318,24 @@ function Restore-AdapterDns($Adapter, $State, [switch]$CheckOwned) {
 
 function Test-Forwarding {
 
-    $urls = if ($Desktop) { @('https://www.microsoft.com/') } else { @('https://gw.buaa.edu.cn/','https://www.bilibili.com/') }
+    $urls = if ($Desktop) { @('https://www.bilibili.com/','https://www.microsoft.com/') } else { @('https://gw.buaa.edu.cn/','https://www.bilibili.com/') }
+    $lastError = $null
     foreach ($url in $urls) {
         $request = [System.Net.HttpWebRequest]::Create($url)
         $request.Proxy = $null
         $request.Method = 'HEAD'
-        $request.Timeout = 15000
+        $request.Timeout = 8000
         try { $response = $request.GetResponse(); $response.Close() }
         catch [System.Net.WebException] {
+            # An authenticated HTTP error still proves the DNS/TLS/TCP path.
             if ($_.Exception.Response) { $_.Exception.Response.Close() }
+            elseif ($Desktop) { $lastError = $_; Write-Log "Forwarded HTTPS check failed for ${url}: $_"; continue }
             else { throw }
         }
+        if ($Desktop) { return }
     }
+    if ($Desktop) { throw $lastError }
+
 }
 
 function Invoke-V6On {

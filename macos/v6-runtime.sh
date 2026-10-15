@@ -59,9 +59,11 @@ validate_forwarding() {
         sleep 1
     done
     curl --noproxy '*' -fsS --max-time 2 http://127.0.0.1:17890/health | grep -q '"data_path_verified":true' || return 1
-    for url in https://gw.buaa.edu.cn/ https://www.bilibili.com/; do
-        curl --noproxy '*' --silent --show-error --head --connect-timeout 10 --max-time 20 "$url" -o /dev/null || return 1
+    for url in https://www.bilibili.com/ https://www.microsoft.com/; do
+        if curl --noproxy '*' --silent --show-error --head --connect-timeout 5 --max-time 8 "$url" -o /dev/null; then return 0; fi
+        log "forwarded HTTPS check failed for $url; trying independent origin"
     done
+    return 1
 }
 stop_core() {
     local pid _attempt

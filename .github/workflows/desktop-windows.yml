@@ -30,6 +30,7 @@ jobs:
           ./windows/test-desktop-retry.ps1
           ./windows/test-dns-recovery.ps1
           ./windows/test-process.ps1
+          ./windows/test-connectivity.ps1
       - name: Build desktop, service and MSI
         shell: pwsh
         run: |
