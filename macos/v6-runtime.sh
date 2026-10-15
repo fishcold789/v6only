@@ -47,7 +47,7 @@ core_active() {
     [[ -f "$CORE_READY" ]] || return 1
     dev=$(core_device)
     [[ "$dev" == utun* ]] || return 1
-    curl --noproxy '*' -fsS --max-time 2 http://127.0.0.1:17890/health | grep -q 'ipv6-only-unless-no-aaaa' || return 1
+    curl --noproxy '*' -fsS --max-time 2 http://127.0.0.1:17890/health | grep -Eq 'ipv6-only-unless-no-aaaa|ipv6-preferred-with-ipv4-fallback' || return 1
     [[ "$(route -n get -inet 1.1.1.1 2>/dev/null | awk '/interface:/{print $2}')" == "$dev" ]] || return 1
     [[ "$(route -n get -inet6 2001:4860::8888 2>/dev/null | awk '/interface:/{print $2}')" == "$dev" ]]
 }
@@ -96,6 +96,7 @@ start_core() {
 <string>--chatgpt-proxy</string><string>127.0.0.1:7890</string>
 <string>--ipv6-dns</string><string>2400:3200::1,2400:3200:baba::1,223.5.5.5,223.6.6.6</string>
 <string>--netease-ipv6</string>
+$(if [[ -f "$STATE_DIR/allow-ipv4-fallback.flag" ]]; then printf '<string>--allow-ipv4-fallback</string>'; fi)
 <string>--device</string><string>utun</string>
 <string>--ready</string><string>$CORE_READY</string>
 <string>--stats-db</string><string>$STATE_DIR/traffic.sqlite</string>

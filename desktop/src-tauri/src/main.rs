@@ -7,14 +7,20 @@ use tauri::Manager;
 fn shell_quote(s:&str)->String {format!("'{}'",s.replace('\'',"'\\''"))}
 fn rpc(q:Value)->Result<Value,String>{
  #[cfg(unix)]
- let mut stream=UnixStream::connect("/var/run/v6only-desktop.sock").map_err(|_|"后台服务尚未安装，点击「安装并启用」完成配置。".to_string())?;
+ let mut stream=UnixStream::connect("/var/run/v6only-desktop.sock").map_err(|e| if !std::path::Path::new("/usr/local/lib/v6only/v6service").exists() {
+  "SERVICE_MISSING: 后台服务尚未安装，点击「安装并启用」完成配置。".to_string()
+ } else {format!("SERVICE_UNAVAILABLE: 后台服务暂时无法连接，请稍后重试。{}",e)})?;
  #[cfg(windows)]
  let mut stream={
+  use std::os::windows::process::CommandExt;
   let mut attempts=0;
   loop {match std::fs::OpenOptions::new().read(true).write(true).open(r"\\.\pipe\v6only-desktop") {
    Ok(stream)=>break stream,
    Err(error) if error.raw_os_error()==Some(231) && attempts<30=>{attempts+=1;std::thread::sleep(std::time::Duration::from_millis(100));},
-   Err(error)=>return Err(format!("无法连接后台服务，请点击「安装并启用」恢复服务。系统错误：{}",error))
+   Err(error)=>{
+    let missing=std::process::Command::new("sc.exe").args(["query","V6Only"]).creation_flags(0x08000000).output().map(|o|o.status.code()==Some(1060)).unwrap_or(false);
+    return Err(if missing {"SERVICE_MISSING: 后台服务尚未安装，请点击「安装并启用」。".into()} else {format!("SERVICE_UNAVAILABLE: 后台服务暂时无法连接，请稍后重试。{}",error)})
+   }
   }}
  };
  #[cfg(unix)]
@@ -26,9 +32,9 @@ fn rpc(q:Value)->Result<Value,String>{
  if r["ok"]==true {Ok(r["data"].clone())}else{Err(r["error"].as_str().unwrap_or("操作失败").to_string())}
 }
 #[tauri::command]
-async fn service(action:String,from:Option<i64>,to:Option<i64>,url:Option<String>)->Result<Value,String>{
- if !["status","enable","disable","stats","diagnose"].contains(&action.as_str()){return Err("无效操作".into())}
- tauri::async_runtime::spawn_blocking(move||rpc(json!({"action":action,"from":from.unwrap_or(0),"to":to.unwrap_or(0),"url":url.unwrap_or_default()}))).await.map_err(|e|e.to_string())?
+async fn service(action:String,from:Option<i64>,to:Option<i64>,url:Option<String>,allow_fallback:Option<bool>)->Result<Value,String>{
+ if !["status","enable","disable","stats","diagnose","set_fallback"].contains(&action.as_str()){return Err("无效操作".into())}
+ tauri::async_runtime::spawn_blocking(move||rpc(json!({"action":action,"from":from.unwrap_or(0),"to":to.unwrap_or(0),"url":url.unwrap_or_default(),"allow_fallback":allow_fallback.unwrap_or(false)}))).await.map_err(|e|e.to_string())?
 }
 #[tauri::command]
 async fn install_service(app:tauri::AppHandle)->Result<Value,String>{

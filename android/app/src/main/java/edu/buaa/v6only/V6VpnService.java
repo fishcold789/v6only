@@ -92,7 +92,7 @@ public class V6VpnService extends VpnService {
         // An IPv4-only physical network cannot carry this strict IPv6 policy.
         // Keep watching LinkProperties so IPv6 recovery starts the tunnel again.
         // In particular, never borrow cellular IPv6 while bound to Wi-Fi.
-        if (!NetworkReadiness.hasUsableIpv6(state.links)) {
+        if (!NetworkReadiness.hasUsableIpv6(state.links) && !prefs.getBoolean("allow_ipv4_fallback", false)) {
             closeTun();
             publish("当前网络没有可用 IPv6，已暂停接管；等待 IPv6 恢复");
             return;
@@ -116,7 +116,8 @@ public class V6VpnService extends VpnService {
         }
         boolean metered = !state.capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
         String key = state.network + ":" + dns + ":" + state.links.getDomains() + ":" + metered
-                + ":" + publicDns(state.network);
+                + ":" + publicDns(state.network) + ":" + state.links.getLinkAddresses()
+                + ":" + state.links.getRoutes() + ":" + prefs.getBoolean("allow_ipv4_fallback", false);
         if (tun != null && key.equals(configuration)) {
             publish("已连接");
             return;
@@ -162,6 +163,7 @@ public class V6VpnService extends VpnService {
             for (String address : publicDns(network)) fallback.put(address);
             org.json.JSONObject config = new org.json.JSONObject().put("dns", servers).put("ipv6_dns", fallback)
                     .put("chatgpt_ipv4", true).put("stats_db", new java.io.File(getFilesDir(), "traffic.sqlite").getAbsolutePath())
+                    .put("allow_ipv4_fallback", prefs.getBoolean("allow_ipv4_fallback", false))
                     .put("fake_dns", true).put("generation",coreGeneration);
             String error = CoreNative.start(next.getFd(), config.toString(), this);
             if (!error.isEmpty()) throw new IOException(error);
@@ -235,9 +237,10 @@ public class V6VpnService extends VpnService {
         handler.post(() -> {
             if (generation!=coreGeneration || destroyed) return;
             Log.e("V6VpnService",error);
-            prefs.edit().putBoolean("enabled",false).commit();
-            stopEverything();
-            publish("转发异常，已恢复系统网络；请检查后手动启动");
+            closeTun();
+            publish("转发异常，已恢复系统网络；30 秒后重试");
+            handler.removeCallbacks(retry);
+            handler.postDelayed(retry, 30000);
         });
     }
 

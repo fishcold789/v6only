@@ -27,6 +27,7 @@ function Assert($condition, $label) {
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('v6only-retry-' + [guid]::NewGuid().ToString())
 New-Item -ItemType Directory $temp | Out-Null
 $Marker = Join-Path $temp 'active.flag'; $Snapshot = Join-Path $temp 'original.json'
+$CoreState = Join-Path $temp 'core-process.json'
 $SuspendFlg = Join-Path $temp 'suspend.flag'; $enabled = Join-Path $temp 'enabled.flag'
 $Desktop = $true; $Watch = $true; $Suspend = $null
 $ManagedDns = @('127.0.0.1'); $BlockedDnsV4 = @('8.8.8.8')
@@ -39,6 +40,7 @@ function Write-Log($msg) { $script:Logs += $msg }
 function Get-ActiveAdapter { return $script:FakeAdapter }
 function Get-NetAdapter { return $script:FakePhysical }
 function Test-CampusNetwork { return $false, '' }
+function Test-Forwarding { if ($script:FailDns) { $script:FailDns=$false; throw 'Simulated forwarding failure' } }
 function Get-NetIPAddress { return [pscustomobject]@{IPAddress='2400:abcd::1'} }
 function Get-ItemProperty { return [pscustomobject]@{NameServer='192.168.1.1'} }
 function Get-DnsClientServerAddress { return [pscustomobject]@{ServerAddresses=$script:FakeDns} }

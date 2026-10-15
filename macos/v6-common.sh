@@ -26,7 +26,7 @@ die() { printf 'v6only: %s\n' "$*" >&2; return 1; }
 require_root() { [[ $EUID -eq 0 ]] || die '需要管理员权限，请使用 sudo。'; }
 desired_dns() { printf '%s\n' "${DNS_SERVERS[@]}"; }
 desired_resolver() { printf 'nameserver %s\n' "${CAMPUS_DNS[@]}"; }
-rules_signature() { printf '%s\n' "$IFACE"; cksum < "$V6_DIR/anchor-v6only"; cksum < "$V6_DIR/v6core"; }
+rules_signature() { printf '%s\n' "$IFACE"; cksum < "$V6_DIR/anchor-v6only"; cksum < "$V6_DIR/v6core"; if [[ -f "$STATE_DIR/allow-ipv4-fallback.flag" ]]; then printf 'fallback\n'; fi; }
 
 # Query this network service, not scutil's first (possibly VPN) resolver.
 current_dns() {

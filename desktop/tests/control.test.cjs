@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 
-async function desktop({installed = false, enabled = false, installError, flows = []} = {}) {
+async function desktop({installed = false, enabled = false, installError, flows = [], statusError = null} = {}) {
   const elements = new Map(), calls = [];
   function element(id) {
     if (!elements.has(id)) elements.set(id, {
@@ -23,7 +23,8 @@ async function desktop({installed = false, enabled = false, installError, flows 
         installed = true;
         return {installed, enabled};
       }
-      if (!installed) throw Error('Service unavailable');
+      if (!installed) throw Error('SERVICE_MISSING: Service not installed');
+      if (args.action === 'status' && statusError) throw Error(statusError);
       if (args.action === 'enable') enabled = true;
       if (args.action === 'disable') enabled = false;
       if (args.action === 'status') return {installed, enabled, health: {}, flows};
@@ -34,7 +35,7 @@ async function desktop({installed = false, enabled = false, installError, flows 
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../ui/app.js'), 'utf8'), context);
   for (let i = 0; i < 10 && vm.runInContext('polling', context); i++) await new Promise(setImmediate);
   calls.length = 0;
-  return {element, calls, click: () => element('control').onclick()};
+  return {element, calls, click: () => element('control').onclick(), refresh: () => vm.runInContext('refresh()', context), setStatusError: e => {statusError=e}, fallback: () => element('allow-fallback').onchange()};
 }
 
 test('Install and enable completes both operations in one click', async () => {
@@ -95,4 +96,34 @@ test('Empty nested wrapper renders empty state, never a blank IPv4 connection', 
   const rows = app.element('flows-body').children;
   assert.equal(rows.length, 1);
   assert.equal(rows[0].children[0].textContent, '暂无符合条件的连接');
+});
+
+
+test('Temporary status errors preserve an installed service and the stop action', async () => {
+  const app = await desktop({installed:true, enabled:true});
+  app.setStatusError('controller timeout');
+  await app.refresh();
+  assert.equal(app.element('control').textContent, '关闭转发');
+  assert.equal(app.element('header-state').textContent, '状态暂时不可用');
+  await app.click();
+  assert.deepEqual(app.calls[app.calls.findIndex(([,a]) => a === 'disable')], ['service','disable']);
+  assert.ok(!app.calls.some(([command]) => command === 'install_service'));
+});
+
+test('An unknown unavailable service offers retry without installation', async () => {
+  const app = await desktop({installed:true, statusError:'SERVICE_UNAVAILABLE: starting'});
+  assert.equal(app.element('control').textContent, '重试连接');
+  await app.click();
+  assert.ok(!app.calls.some(([command]) => command === 'install_service'));
+  app.setStatusError(null);
+  await app.refresh();
+  assert.equal(app.element('control').textContent, '启用转发');
+});
+
+test('IPv4 fallback is an explicit service action and off by default', async () => {
+  const app = await desktop({installed:true});
+  assert.equal(app.element('allow-fallback').checked, false);
+  app.element('allow-fallback').checked = true;
+  await app.fallback();
+  assert.deepEqual(app.calls[0], ['service','set_fallback']);
 });

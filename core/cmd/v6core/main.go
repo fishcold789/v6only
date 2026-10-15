@@ -29,6 +29,7 @@ var version = "dev"
 func run() error {
 	iface := flag.String("interface", "", "physical outbound interface (required for TUN)")
 	dns := flag.String("dns", "202.112.128.50,202.112.128.51", "physical DNS IPs, comma-separated")
+	allowFallback := flag.Bool("allow-ipv4-fallback", false, "explicitly allow IPv4 after IPv6 connection failure")
 	chatIPv4 := flag.Bool("chatgpt-ipv4", false, "keep ChatGPT connections on IPv4")
 	chatProxy := flag.String("chatgpt-proxy", "", "ChatGPT IPv4 local HTTP proxy exception")
 	ipv6DNS := flag.String("ipv6-dns", "", "IPv6 DNS servers for global AAAA lookups; campus domains retain campus DNS")
@@ -50,6 +51,7 @@ func run() error {
 	}
 	cfg := core.Config{ChatGPTIPv4: *chatIPv4, ChatGPTProxy: *chatProxy, DNS: strings.Split(*dns, ","), Interface: *iface, FakeDNS: *fakeDNS}
 	cfg.NeteaseIPv6 = *neteaseIPv6
+	cfg.AllowIPv4Fallback = *allowFallback
 	if *ipv6DNS != "" {
 		cfg.IPv6DNS = strings.Split(*ipv6DNS, ",")
 	}
@@ -163,7 +165,7 @@ func run() error {
 	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"ready":true,"policy":"ipv6-only-unless-no-aaaa","data_path_verified":%t}`, r.HealthVerified())
+		json.NewEncoder(w).Encode(map[string]any{"ready": true, "policy": r.Policy(), "data_path_verified": r.HealthVerified(), "allow_ipv4_fallback": cfg.AllowIPv4Fallback})
 	})
 	mux.HandleFunc("/stats", func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -192,7 +194,7 @@ func run() error {
 		if tunnel != nil {
 			name = tunnel.Device.Name()
 		}
-		b, _ := json.Marshal(map[string]any{"pid": os.Getpid(), "device": name, "policy": "ipv6-only-unless-no-aaaa"})
+		b, _ := json.Marshal(map[string]any{"pid": os.Getpid(), "device": name, "policy": r.Policy()})
 		if e = os.WriteFile(*ready, b, 0600); e != nil {
 			return e
 		}

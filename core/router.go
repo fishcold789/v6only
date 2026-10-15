@@ -18,16 +18,17 @@ import (
 )
 
 type Config struct {
-	DNS             []string `json:"dns"`
-	IPv6DNS         []string `json:"ipv6_dns,omitempty"`
-	NeteaseIPv6     bool     `json:"netease_ipv6,omitempty"`
-	ChatGPTProxy    string   `json:"chatgpt_proxy,omitempty"`
-	ChatGPTIPv4     bool     `json:"chatgpt_ipv4,omitempty"`
-	StatsDB         string   `json:"stats_db,omitempty"`
-	Interface       string   `json:"interface"`
-	FamilyTimeoutMS int      `json:"family_timeout_ms"`
-	FakeDNS         bool     `json:"fake_dns"`
-	Generation      int64    `json:"generation"`
+	DNS               []string `json:"dns"`
+	IPv6DNS           []string `json:"ipv6_dns,omitempty"`
+	NeteaseIPv6       bool     `json:"netease_ipv6,omitempty"`
+	ChatGPTProxy      string   `json:"chatgpt_proxy,omitempty"`
+	AllowIPv4Fallback bool     `json:"allow_ipv4_fallback,omitempty"`
+	ChatGPTIPv4       bool     `json:"chatgpt_ipv4,omitempty"`
+	StatsDB           string   `json:"stats_db,omitempty"`
+	Interface         string   `json:"interface"`
+	FamilyTimeoutMS   int      `json:"family_timeout_ms"`
+	FakeDNS           bool     `json:"fake_dns"`
+	Generation        int64    `json:"generation"`
 }
 type Flow struct {
 	Host          string    `json:"host"`
@@ -568,6 +569,14 @@ func (r *Router) Dial(ctx context.Context, host, port string) (net.Conn, error) 
 	if len(addresses.V6) > 0 {
 		c, e := r.dialIPv6(ctx, host, port, addresses.V6)
 		if e != nil {
+			if r.cfg.AllowIPv4Fallback && len(addresses.V4) > 0 && ctx.Err() == nil {
+				c, fallbackErr := r.family(ctx, addresses.V4, port, "tcp4")
+				if fallbackErr == nil {
+					r.record(host, c, "tcp4", "ipv6_failed_fallback")
+					return c, nil
+				}
+				return nil, fmt.Errorf("IPv6 failed: %v; opted-in IPv4 fallback failed: %w", e, fallbackErr)
+			}
 			return nil, fmt.Errorf("IPv6 required for %s; IPv4 fallback forbidden: %w", host, e)
 		}
 		r.record(host, c, "tcp6", "ipv6_required")
@@ -587,4 +596,11 @@ func (r *Router) Dial(ctx context.Context, host, port string) (net.Conn, error) 
 // Resolve returns both families without using the system proxy.
 func (r *Router) Resolve(ctx context.Context, host string) (Result, error) {
 	return r.addresses(ctx, host)
+}
+
+func (r *Router) Policy() string {
+	if r.cfg.AllowIPv4Fallback {
+		return "ipv6-preferred-with-ipv4-fallback"
+	}
+	return "ipv6-only-unless-no-aaaa"
 }

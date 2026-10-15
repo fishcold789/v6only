@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -27,10 +28,11 @@ const lib = "/usr/local/lib/v6only"
 const database = "/var/db/v6only/traffic.sqlite"
 
 type Request struct {
-	Action string `json:"action"`
-	From   int64  `json:"from"`
-	To     int64  `json:"to"`
-	URL    string `json:"url"`
+	Action        string `json:"action"`
+	From          int64  `json:"from"`
+	To            int64  `json:"to"`
+	URL           string `json:"url"`
+	AllowFallback bool   `json:"allow_fallback"`
 }
 
 var operation sync.Mutex
@@ -88,7 +90,7 @@ func status() any {
 	logs := "控制器：\n" + tail("/var/log/v6only.log", 16) + "\n\n转发核心：\n" + tail("/var/db/v6only/core.log", 24)
 	pac, _ := command("/usr/sbin/networksetup", "-getautoproxyurl", "Wi-Fi")
 	socks, _ := command("/usr/sbin/networksetup", "-getsocksfirewallproxy", "Wi-Fi")
-	return map[string]any{"installed": true, "enabled": valid, "suspended": suspended == nil, "health": h, "watcher_running": strings.Contains(watch, "state = running"), "ipv6_interface": ipv6, "proxy": proxy + secure + socks, "pac": pac, "flows": localJSON("/flows"), "logs": logs, "policy": "ipv6-only-unless-no-aaaa", "version": "2.1.6"}
+	return map[string]any{"installed": true, "enabled": valid, "suspended": suspended == nil, "health": h, "watcher_running": strings.Contains(watch, "state = running"), "ipv6_interface": ipv6, "proxy": proxy + secure + socks, "pac": pac, "flows": localJSON("/flows"), "logs": logs, "policy": policy(), "version": "2.1.7", "allow_ipv4_fallback": fallbackEnabled()}
 }
 func diagnose(raw string) any {
 	if !strings.Contains(raw, "://") {
@@ -100,7 +102,7 @@ func diagnose(raw string) any {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
-	r := core.New(core.Config{ChatGPTProxy: "127.0.0.1:7890", DNS: []string{"202.112.128.50", "202.112.128.51"}, IPv6DNS: []string{"2400:3200::1", "2400:3200:baba::1", "223.5.5.5", "223.6.6.6"}, Interface: "en0"}, nil)
+	r := core.New(core.Config{ChatGPTProxy: "127.0.0.1:7890", DNS: []string{"202.112.128.50", "202.112.128.51"}, IPv6DNS: []string{"2400:3200::1", "2400:3200:baba::1", "223.5.5.5", "223.6.6.6"}, Interface: "en0", AllowIPv4Fallback: fallbackEnabled()}, nil)
 	defer r.Close()
 	i, e := net.InterfaceByName("en0")
 	if e != nil {
@@ -120,7 +122,7 @@ func diagnose(raw string) any {
 	for _, ip := range resolved.V4 {
 		v4 = append(v4, ip.String())
 	}
-	result := map[string]any{"url": raw, "aaaa": v6, "a": v4, "flows": []core.Flow{}, "http_status": 0, "policy": "ipv6-only-unless-no-aaaa"}
+	result := map[string]any{"url": raw, "aaaa": v6, "a": v4, "flows": []core.Flow{}, "http_status": 0, "policy": policy()}
 	if e == nil {
 		c := &http.Client{Timeout: 20 * time.Second, Transport: &http.Transport{Proxy: nil, DialContext: func(ctx context.Context, n, a string) (net.Conn, error) {
 			h, p, e := net.SplitHostPort(a)
@@ -146,12 +148,24 @@ func diagnose(raw string) any {
 	}
 	return result
 }
+func policy() string {
+	if fallbackEnabled() {
+		return "ipv6-preferred-with-ipv4-fallback"
+	}
+	return "ipv6-only-unless-no-aaaa"
+}
+func fallbackEnabled() bool {
+	_, err := os.Stat(filepath.Join("/var/db/v6only", "allow-ipv4-fallback.flag"))
+	return err == nil
+}
 func handle(q Request) (any, error) {
 	switch q.Action {
 	case "status":
 		return status(), nil
 	case "enable", "disable":
-		operation.Lock()
+		if !operation.TryLock() {
+			return nil, errBusy
+		}
 		defer operation.Unlock()
 		arg := "on"
 		if q.Action == "disable" {
@@ -166,6 +180,18 @@ func handle(q Request) (any, error) {
 			return nil, fmt.Errorf("%s: %w", out, e)
 		}
 		return map[string]any{"message": out, "status": status()}, nil
+	case "set_fallback":
+		return withOperation(&operation, func() (any, error) {
+			action := "fallback-off"
+			if q.AllowFallback {
+				action = "fallback-on"
+			}
+			out, e := command("/bin/bash", lib+"/v6ctl.sh", action)
+			if e != nil {
+				return nil, fmt.Errorf("%s: %w", out, e)
+			}
+			return status(), nil
+		})
 	case "stats":
 		if q.To == 0 {
 			q.To = time.Now().Unix() + 1
@@ -209,7 +235,7 @@ func main() {
 		}
 		go func(c net.Conn) {
 			defer c.Close()
-			c.SetDeadline(time.Now().Add(90 * time.Second))
+			c.SetReadDeadline(time.Now().Add(5 * time.Second))
 			s := bufio.NewScanner(io.LimitReader(c, 16384))
 			if !s.Scan() {
 				return
@@ -218,6 +244,8 @@ func main() {
 			if json.Unmarshal(s.Bytes(), &req) != nil {
 				return
 			}
+			c.SetReadDeadline(time.Time{})
+			c.SetWriteDeadline(time.Now().Add(85 * time.Second))
 			data, e := handle(req)
 			response := map[string]any{"ok": e == nil, "data": data}
 			if e != nil {

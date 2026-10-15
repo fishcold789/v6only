@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/url"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Microsoft/go-winio"
@@ -27,14 +29,16 @@ import (
 const pipeName = `\\.\pipe\v6only-desktop`
 
 type request struct {
-	Action string `json:"action"`
-	From   int64  `json:"from"`
-	To     int64  `json:"to"`
-	URL    string `json:"url"`
+	Action        string `json:"action"`
+	From          int64  `json:"from"`
+	To            int64  `json:"to"`
+	URL           string `json:"url"`
+	AllowFallback bool   `json:"allow_fallback"`
 }
 
 var operation sync.Mutex
 var root string
+var stopping atomic.Bool
 
 func controller(action string) (json.RawMessage, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
@@ -62,29 +66,38 @@ func controller(action string) (json.RawMessage, error) {
 func handle(q request) (any, error) {
 	switch q.Action {
 	case "status":
-		operation.Lock()
-		defer operation.Unlock()
+		// Status reads atomic snapshots and never waits behind network mutation.
 		return controller("status")
-	case "enable", "disable":
-		operation.Lock()
-		defer operation.Unlock()
-		b, e := controller(q.Action)
-		return map[string]any{"status": b}, e
+	case "enable", "disable", "set_fallback":
+		if stopping.Load() {
+			return nil, fmt.Errorf("SERVICE_UNAVAILABLE: 后台服务正在停止")
+		}
+		return withOperation(&operation, func() (any, error) {
+			action := q.Action
+			if action == "set_fallback" {
+				if q.AllowFallback {
+					action = "fallback-on"
+				} else {
+					action = "fallback-off"
+				}
+			}
+			b, e := controller(action)
+			return map[string]any{"status": b}, e
+		})
 	case "stats":
 		if q.To == 0 {
 			q.To = time.Now().Unix() + 1
 		}
 		return core.ReadTraffic(filepath.Join(os.Getenv("ProgramData"), "v6only", "traffic.sqlite"), q.From, q.To)
 	case "diagnose":
-		operation.Lock()
-		defer operation.Unlock()
 		bstatus, e := controller("status")
 		if e != nil {
 			return nil, e
 		}
 		var st struct {
-			Interface string   `json:"interface_name"`
-			DNS       []string `json:"dns"`
+			Interface     string   `json:"interface_name"`
+			DNS           []string `json:"dns"`
+			AllowFallback bool     `json:"allow_ipv4_fallback"`
 		}
 		json.Unmarshal(bstatus, &st)
 		if st.Interface == "" {
@@ -104,7 +117,11 @@ func handle(q request) (any, error) {
 		// Only a URL is accepted; it is passed as one argv value, never to a shell.
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, filepath.Join(root, "v6core.exe"), "--interface", st.Interface, "--dns", strings.Join(st.DNS, ","), "--ipv6-dns", "2400:3200::1,2400:3200:baba::1", "--chatgpt-ipv4", "--probe", raw)
+		args := []string{"--interface", st.Interface, "--dns", strings.Join(st.DNS, ","), "--ipv6-dns", "2400:3200::1,2400:3200:baba::1", "--chatgpt-ipv4", "--probe", raw}
+		if st.AllowFallback {
+			args = append(args, "--allow-ipv4-fallback")
+		}
+		cmd := exec.CommandContext(ctx, filepath.Join(root, "v6core.exe"), args...)
 		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 		b, e := cmd.Output()
 		if !json.Valid(b) {
@@ -119,7 +136,7 @@ func handle(q request) (any, error) {
 }
 func serve(c net.Conn) {
 	defer c.Close()
-	c.SetDeadline(time.Now().Add(90 * time.Second))
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
 	s := bufio.NewScanner(io.LimitReader(c, 16384))
 	if !s.Scan() {
 		return
@@ -128,6 +145,8 @@ func serve(c net.Conn) {
 	if json.Unmarshal(s.Bytes(), &q) != nil {
 		return
 	}
+	c.SetReadDeadline(time.Time{})
+	c.SetWriteDeadline(time.Now().Add(85 * time.Second))
 	data, e := handle(q)
 	r := map[string]any{"ok": e == nil, "data": data}
 	if e != nil {
@@ -175,9 +194,12 @@ func (service) Execute(_ []string, requests <-chan svc.ChangeRequest, status cha
 				return
 			default:
 			}
-			operation.Lock()
-			controller("watch")
-			operation.Unlock()
+			if operation.TryLock() {
+				if _, err := controller("watch"); err != nil {
+					log.Printf("watch failed: %v", err)
+				}
+				operation.Unlock()
+			}
 			select {
 			case <-done:
 				return
@@ -190,12 +212,36 @@ func (service) Execute(_ []string, requests <-chan svc.ChangeRequest, status cha
 		case svc.Interrogate:
 			status <- r.CurrentStatus
 		case svc.Stop, svc.Shutdown:
-			status <- svc.Status{State: svc.StopPending}
+			stopping.Store(true)
+			l.Close()
+			status <- svc.Status{State: svc.StopPending, WaitHint: 180000, CheckPoint: 1}
 			close(done)
-			<-watchDone
-			operation.Lock()
-			controller("stop")
-			operation.Unlock()
+			cleanup := make(chan error, 1)
+			go func() {
+				<-watchDone
+				operation.Lock()
+				defer operation.Unlock()
+				_, err := controller("stop")
+				cleanup <- err
+			}()
+			checkpoint := uint32(1)
+			var stopErr error
+		waitCleanup:
+			for {
+				select {
+				case stopErr = <-cleanup:
+					break waitCleanup
+				case <-time.After(2 * time.Second):
+					checkpoint++
+					status <- svc.Status{State: svc.StopPending, WaitHint: 180000, CheckPoint: checkpoint}
+				}
+			}
+			if stopErr != nil {
+				log.Printf("stop cleanup failed: %v", stopErr)
+			}
+			if stopErr != nil {
+				return false, 1
+			}
 			return false, 0
 		}
 	}
@@ -207,6 +253,13 @@ func main() {
 		panic(e)
 	}
 	root = filepath.Join(filepath.Dir(exe), "windows")
+	logDir := filepath.Join(os.Getenv("ProgramData"), "v6only")
+	if os.MkdirAll(logDir, 0700) == nil {
+		if f, err := os.OpenFile(filepath.Join(logDir, "service.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); err == nil {
+			defer f.Close()
+			log.SetOutput(f)
+		}
+	}
 	if e = svc.Run("V6Only", service{}); e != nil {
 		fmt.Fprintln(os.Stderr, e)
 		os.Exit(1)

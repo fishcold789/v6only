@@ -29,7 +29,13 @@ save_originals() {
     fi
     stage=$(mktemp -d "$STATE_DIR/snapshot.XXXXXX")
     printf '%s\n' "$SERVICE" > "$stage/service"
-    current_dns > "$stage/dns"
+    current_dns > "$stage/dns" || { rm -rf "$stage"; return 1; }
+    # Never preserve a dead process-local resolver as the original configuration.
+    if grep -Eq '^(127\.|::1$|0\.0\.0\.0$|::$)' "$stage/dns"; then
+        rm -rf "$stage"
+        die '原始 DNS 指向本机，请先恢复该网络服务的真实 DNS 后重试。'; return 1
+    fi
+    printf '%s\n' "$IFACE" > "$stage/interface"
     current_bypass > "$stage/bypass"
     for kind in webproxy securewebproxy socksfirewallproxy; do
         networksetup -get"$kind" "$SERVICE" | awk '/^Enabled:/{print $2;exit}' > "$stage/proxy.$kind"
@@ -61,7 +67,14 @@ restore() {
     if [[ -d "$ORIGINAL" ]]; then
         SERVICE=$(cat "$ORIGINAL/service")
         if dns=$(current_dns); then
-            if [[ "$dns" == "$(desired_dns)" || "$dns" == $'202.112.128.50\n202.112.128.51\n2400:3200::1' ]]; then set_dns_file "$ORIGINAL/dns" || failed=1; fi
+            if [[ "$dns" == "$(desired_dns)" || "$dns" == $'202.112.128.50\n202.112.128.51\n2400:3200::1' ]]; then
+                if grep -Eq '^(127\.|::1$|0\.0\.0\.0$|::$)' "$ORIGINAL/dns"; then
+                    # Keep the poisoned snapshot for manual recovery; still stop
+                    # the core and remove independently owned rules below.
+                    printf '原始 DNS 快照指向本机，需手动恢复真实 DNS。\n' >&2
+                    failed=1
+                else set_dns_file "$ORIGINAL/dns" || failed=1; fi
+            fi
         else
             failed=1
         fi
@@ -86,7 +99,7 @@ restore() {
     fi
     if [[ -f "$STATE_DIR/proxy.managed" && -d "$ORIGINAL" ]]; then
         for kind in webproxy securewebproxy socksfirewallproxy; do
-            current=$(networksetup -get"$kind" "$SERVICE" | awk '/^Enabled:/{print $2;exit}')
+            current=$(networksetup -get"$kind" "$SERVICE" | awk '/^Enabled:/{print $2;exit}') || { failed=1; continue; }
             if [[ "$current" == No && -f "$ORIGINAL/proxy.$kind" ]]; then
                 original=$(cat "$ORIGINAL/proxy.$kind")
                 if [[ "$original" == Yes ]]; then networksetup -set"$kind"state "$SERVICE" on || failed=1; fi
@@ -94,7 +107,7 @@ restore() {
         done
     fi
     if [[ -f "$STATE_DIR/proxy.managed" && -f "$ORIGINAL/proxy.pac" ]]; then
-        pac=$(networksetup -getautoproxyurl "$SERVICE")
+        pac=$(networksetup -getautoproxyurl "$SERVICE") || { failed=1; pac=''; }
         if printf '%s\n' "$pac" | grep -Fxq "URL: $PAC_URL"; then
             networksetup -setautoproxystate "$SERVICE" off || failed=1
             old_url=$(sed -n 's/^URL: //p' "$ORIGINAL/proxy.pac")
@@ -127,9 +140,9 @@ apply_failed() {
     set +e
     printf '配置失败，正在撤销本次管理的网络设置。\n' >&2
     if restore; then
-        # A failed activation requires an explicit retry, never repeated network
-        # takeover in the background on the same broken configuration.
-        : > "$SUSPEND"
+        # Restore connectivity immediately, then retry with a finite cooldown.
+        # Manual off still writes an empty, indefinite pause.
+        printf '%s\n' "$(( $(date +%s) + RETRY_INTERVAL ))" > "$SUSPEND"
     else
         printf '部分回滚失败，快照保留于 %s。\n' "$STATE_DIR" >&2
     fi
@@ -149,7 +162,9 @@ on() {
     fi
     [[ "$IFACE" =~ ^[a-zA-Z][a-zA-Z0-9]*$ ]] || die '非法网卡名称。'
     addresses=$(ifconfig "$IFACE" inet6)
-    printf '%s\n' "$addresses" | grep -Eq 'inet6 [23][0-9a-fA-F]{3}:' || die '该接口暂无全球 IPv6 地址。'
+    if [[ ! -f "$STATE_DIR/allow-ipv4-fallback.flag" ]]; then
+        printf '%s\n' "$addresses" | grep -Eq 'inet6 [23][0-9a-fA-F]{3}:' || die '该接口暂无全球 IPv6 地址。'
+    fi
     pf_hook_present || die 'PF 主规则缺少 com.apple/* 入口；请按 README 迁移旧版，未修改网络。'
     pfctl -n -a "$PF_ANCHOR" -D "v6only_if=$IFACE" -f "$V6_DIR/anchor-v6only"
     [[ ! -L "$RESOLVER_DIR/$PORTAL_HOST" ]] || die '网关 resolver 是符号链接，请先检查。'
@@ -188,13 +203,15 @@ on() {
     validate_forwarding || die '转发后的 DNS/TLS 连通性验证失败，恢复原网络。'
     rm -f "$SUSPEND"
     trap - ERR
-    printf '已启用严格 IPv6 转发；仅无 AAAA 记录的目标使用 IPv4。\n'
+    if [[ -f "$STATE_DIR/allow-ipv4-fallback.flag" ]]; then printf '已启用 IPv6 优先转发，连接失败时允许 IPv4 回退。\n';
+    else printf '已启用严格 IPv6 转发；仅无 AAAA 记录的目标使用 IPv4。\n'; fi
 }
 
 off() {
     local mode="${1:-manual}"
     if [[ -f "$MARKER" && ! -d "$ORIGINAL" ]]; then
-        die '旧版缺少设置快照，拒绝全局关闭 PF；请先完成迁移。'; return 1
+        stop_core || true
+        die '旧版缺少设置快照，已停止核心；请手动检查 DNS 和代理。'; return 1
     fi
     restore
     if [[ "$mode" == manual ]]; then
@@ -209,8 +226,18 @@ main() {
     case "${1:-status}" in
         on) lock; on;;
         off) lock; off "${2:-manual}";;
+        policy-changed|fallback-on|fallback-off)
+            lock
+            local was_active=0
+            if [[ "$1" == fallback-on ]]; then
+                printf 'enabled\n' > "$STATE_DIR/allow-ipv4-fallback.flag.tmp"
+                mv "$STATE_DIR/allow-ipv4-fallback.flag.tmp" "$STATE_DIR/allow-ipv4-fallback.flag"
+            elif [[ "$1" == fallback-off ]]; then rm -f "$STATE_DIR/allow-ipv4-fallback.flag"; fi
+            [[ ! -f "$MARKER" ]] || was_active=1
+            restore || return 1
+            if [[ "$was_active" == 1 ]] && ! suspended; then on; fi;;
         status)
-            if configuration_active; then printf '严格 IPv6 转发已生效。\n';
+            if configuration_active; then printf '转发配置已生效。\n';
             else die '配置未完整生效。'; fi;;
         *) die '用法：v6ctl.sh on | off [auto] | status';;
     esac

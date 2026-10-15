@@ -217,7 +217,7 @@ func (r *Router) OpenUDP(ctx context.Context, host, port string, first []byte) (
 	}
 	var last error = errors.New("no UDP addresses")
 	families := [][]net.IP{result.V6, nil}
-	if len(result.V6) == 0 {
+	if len(result.V6) == 0 || r.cfg.AllowIPv4Fallback {
 		families[1] = result.V4
 	}
 	for family, ips := range families {
@@ -235,6 +235,9 @@ func (r *Router) OpenUDP(ctx context.Context, host, port string, first []byte) (
 			if family == 1 {
 				network = "udp4"
 				reason = "no_aaaa"
+				if len(result.V6) > 0 {
+					reason = "ipv6_failed_fallback"
+				}
 			}
 			sub, cancel := context.WithTimeout(ctx, per)
 			c, e := r.rawDial(sub, network, net.JoinHostPort(ip.String(), port))

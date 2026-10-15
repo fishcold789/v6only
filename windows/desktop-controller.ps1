@@ -1,4 +1,4 @@
-﻿param([ValidateSet('status','enable','disable','watch','stop')][string]$Action='status')
+﻿param([ValidateSet('status','enable','disable','watch','stop','fallback-on','fallback-off')][string]$Action='status')
 $ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
 # Load the controller without invoking its CLI entry point.
@@ -13,10 +13,23 @@ $LogFile=Join-Path $dir 'v6only.log';$CoreReady=Join-Path $dir 'core.ready';$Cor
 $ManagedDns=@('127.0.0.1');$BlockedDnsV4=@('8.8.8.8','8.8.4.4','1.1.1.1','9.9.9.9')
 $enabled=Join-Path $dir 'enabled.flag'
 switch($Action){
+ 'fallback-on' {
+   $wasActive=(Test-Path $Marker) -and -not (Test-Suspended $SuspendFlg)
+   New-Item -ItemType File -Force (Join-Path $dir 'allow-ipv4-fallback.flag') | Out-Null
+   Invoke-V6Off -Automatic
+   if($wasActive -and (Test-Path $enabled)){Invoke-V6On}
+ }
+ 'fallback-off' {
+   $wasActive=(Test-Path $Marker) -and -not (Test-Suspended $SuspendFlg)
+   Remove-Item (Join-Path $dir 'allow-ipv4-fallback.flag') -Force -ErrorAction SilentlyContinue
+   Invoke-V6Off -Automatic
+   if($wasActive -and (Test-Path $enabled)){Invoke-V6On}
+ }
  'enable' {New-Item -ItemType File -Force $enabled|Out-Null;Remove-Item $SuspendFlg -Force -ErrorAction SilentlyContinue;Invoke-V6On}
  'disable' {Remove-Item $enabled -Force -ErrorAction SilentlyContinue;Invoke-V6Off -Automatic}
  'stop' {Invoke-V6Off -Automatic}
  'watch' {
+   if(!(Test-Path $enabled) -and ((Test-Path $Snapshot) -or (Test-Path $CoreState))){Invoke-V6Off -Automatic}
    if((Test-Path $enabled) -and -not (Test-Suspended $SuspendFlg)){
      $adapter=Get-ActiveAdapter
      if($adapter){Invoke-V6On}
@@ -24,15 +37,16 @@ switch($Action){
    }
  }
 }
-if($Action -in @('status','enable','disable')){
+if($Action -in @('status','enable','disable','fallback-on','fallback-off')){
  # Enumerate the parsed array into a new array. PowerShell 5.1 adds
  # extended properties even to ConvertFrom-Json arrays; wrapping that
  # object in @() alone leaves a nested {value, Count} object in the UI.
  $health=$null;$flows=@();try{$health=Invoke-RestMethod http://127.0.0.1:17890/health -TimeoutSec 2;$parsedFlows=ConvertFrom-Json -InputObject ((Invoke-WebRequest -UseBasicParsing http://127.0.0.1:17890/flows -TimeoutSec 2).Content);$flows=@(foreach($flow in $parsedFlows){$flow})}catch{}
  $adapter=Get-ActiveAdapter
- $physicalDns=@();if(Test-Path $Snapshot){$physicalDns=@((Get-Content $Snapshot -Raw|ConvertFrom-Json).OriginalDns)}elseif($adapter){$physicalDns=@(Get-AdapterDns $adapter)}
+ $physicalDns=@();if($adapter){$physicalDns=@(Get-AdapterDns $adapter | Where-Object { -not (Test-LocalDns @($_)) })};if(!$physicalDns -and (Test-Path $Snapshot)){$physicalDns=@((Get-Content $Snapshot -Raw|ConvertFrom-Json).OriginalDns | Where-Object { -not (Test-LocalDns @($_)) })}
  $addresses=@(Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue|Where-Object IPAddress -Match '^[23][0-9a-fA-F]{3}:')
  $logs=if(Test-Path $LogFile){(Get-Content $LogFile -Tail 30)-join "`n"}else{''}
+ if(Test-Path (Join-Path $dir 'service.log')){$logs+="`n"+((Get-Content (Join-Path $dir 'service.log') -Tail 10)-join "`n")}
  $logs+="`n";if(Test-Path (Join-Path $dir 'core-error.log')){$logs+=(Get-Content (Join-Path $dir 'core-error.log') -Tail 20)-join "`n"}
- @{interface_name=$adapter.Name;dns=$physicalDns;installed=$true;enabled=((Test-Path $Marker) -and (Test-CoreActive));suspended=(!(Test-Path $enabled) -or (Test-Suspended $SuspendFlg));health=$health;flows=$flows;ipv6_interface=(($addresses|ForEach-Object {'inet6 '+$_.IPAddress})-join "`n");proxy='';pac='';logs=$logs;version='2.1.6'}|ConvertTo-Json -Depth 12 -Compress
+ @{interface_name=$adapter.Name;dns=$physicalDns;installed=$true;allow_ipv4_fallback=(Test-Path (Join-Path $dir 'allow-ipv4-fallback.flag'));enabled=((Test-Path $Marker) -and (Test-CoreActive));suspended=(!(Test-Path $enabled) -or (Test-Suspended $SuspendFlg -ReadOnly));health=$health;flows=$flows;ipv6_interface=(($addresses|ForEach-Object {'inet6 '+$_.IPAddress})-join "`n");proxy='';pac='';logs=$logs;version='2.1.7'}|ConvertTo-Json -Depth 12 -Compress
 }

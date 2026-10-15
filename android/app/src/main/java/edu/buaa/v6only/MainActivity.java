@@ -37,6 +37,7 @@ public class MainActivity extends Activity {
     private TextView wifiDetail, batteryDetail, notificationDetail;
     private Button toggle;
     private RadioGroup modes;
+    private android.widget.CheckBox allowFallback;
     private SharedPreferences prefs;
     private boolean rendering, pending, pendingStart;
     private final java.util.concurrent.ExecutorService statsWorker = java.util.concurrent.Executors.newSingleThreadExecutor();
@@ -67,6 +68,13 @@ public class MainActivity extends Activity {
         notificationDetail = findViewById(R.id.notification_detail);
         toggle = findViewById(R.id.toggle_service);
         modes = findViewById(R.id.mode_group);
+        allowFallback = findViewById(R.id.allow_ipv4_fallback);
+        allowFallback.setChecked(prefs.getBoolean("allow_ipv4_fallback", false));
+        allowFallback.setOnCheckedChangeListener((button, checked) -> {
+            if (rendering) return;
+            prefs.edit().putBoolean("allow_ipv4_fallback", checked).commit();
+            if (prefs.getBoolean("enabled", false)) sendCommand(V6VpnService.ACTION_APPLY);
+        });
         try {
             ((TextView) findViewById(R.id.version)).setText(
                     "v" + getPackageManager().getPackageInfo(getPackageName(), 0).versionName);

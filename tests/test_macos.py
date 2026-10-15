@@ -22,6 +22,7 @@ def mutate():
     if s.get('fail') == name+':'+a[0]:
         s.pop('fail'); done('simulated failure',1)
 if name=='networksetup':
+    if s.get('service_unavailable'): done('network service unavailable',1)
     if a[0]=='-getautoproxyurl': done('URL: '+s.get('pac_url','')+'\nEnabled: '+s.get('pac_enabled','No'))
     if a[0]=='-setautoproxyurl': mutate();s['pac_url']=a[2];s['pac_enabled']='Yes';done()
     if a[0]=='-setautoproxystate': mutate();s['pac_enabled']='Yes' if a[2]=='on' else 'No';done()
@@ -236,13 +237,13 @@ class MacOSControllerTests(unittest.TestCase):
         self.script(f'V6_DIR="{fake}"; watch_once; watch_once',source='v6-watch.sh')
         self.assertEqual((self.base/'run/attempts').read_text().splitlines(),['attempt'])
 
-    def test_end_to_end_validation_failure_restores_and_latches_pause(self):
+    def test_end_to_end_validation_failure_restores_and_backs_off(self):
         self.env['FAKE_FORWARD_FAIL']='1'
         self.on(ok=False)
         self.assertEqual(self.read()['dns'],self.initial['dns'])
         self.assertFalse((self.base/'state/fake-core').exists())
         self.assertFalse((self.base/'run/v6only.active').exists())
-        self.assertEqual((self.base/'run/v6only.suspend').read_text(),'')
+        self.assertGreater(int((self.base/'run/v6only.suspend').read_text()),0)
         count=len(self.read()['writes'])
         self.script('watch_once',source='v6-watch.sh')
         self.assertEqual(len(self.read()['writes']),count)
@@ -253,7 +254,35 @@ class MacOSControllerTests(unittest.TestCase):
         fake=self.base/'controller';fake.mkdir()
         (fake/'v6ctl.sh').write_text('echo "$*" >> "$RUN_DIR/attempts"\n')
         self.script(f'V6_DIR="{fake}"; watch_once; watch_once',source='v6-watch.sh')
-        self.assertEqual((self.base/'run/attempts').read_text().splitlines(),['off'])
-        self.assertEqual((self.base/'run/v6only.suspend').read_text(),'')
+        self.assertEqual((self.base/'run/attempts').read_text().splitlines(),['off auto'])
+        self.assertGreater(int((self.base/'run/v6only.suspend').read_text()),0)
+
+    def test_local_dns_cannot_pollute_original_snapshot(self):
+        s=self.read();s['dns']=['127.0.0.1'];self.save(s)
+        self.on(ok=False)
+        self.assertFalse((self.base/'state/original').exists())
+        self.assertEqual(self.read()['writes'],[])
+
+    def test_poisoned_snapshot_still_cleans_core_and_pf(self):
+        self.on()
+        (self.base/'state/original/dns').write_text('127.0.0.1\n')
+        self.script('main off auto',ok=False)
+        self.assertFalse((self.base/'state/fake-core').exists())
+        self.assertEqual(self.read()['anchor'],'')
+        self.assertTrue((self.base/'state/original').exists())
+
+    def test_missing_network_service_still_cleans_core_and_pf(self):
+        self.on()
+        s=self.read();s['service_unavailable']=True;self.save(s)
+        self.script('main off auto',ok=False)
+        self.assertFalse((self.base/'state/fake-core').exists())
+        self.assertEqual(self.read()['anchor'],'')
+        self.assertTrue((self.base/'state/original').exists())
+
+    def test_policy_change_preserves_manual_pause(self):
+        self.on();self.off()
+        self.script('main policy-changed')
+        self.assertTrue((self.base/'run/v6only.suspend').exists())
+        self.assertFalse((self.base/'state/fake-core').exists())
 
 if __name__ == '__main__': unittest.main()
