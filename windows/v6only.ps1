@@ -123,15 +123,34 @@ function Wait-ForwardingAdapter([string]$Name) {
     throw "Forwarding adapter $Name is unavailable after driver start"
 }
 
+function Invoke-BoundedProcess([string]$File, [string]$Arguments, [string]$OutputPath, [string]$ErrorPath, [int]$TimeoutMs = 15000) {
+    # Own the native process handle from creation. Start-Process's redirected
+    # Process objects can return a null ExitCode on Windows PowerShell 5.1.
+    $info = New-Object System.Diagnostics.ProcessStartInfo
+    $info.FileName=$File; $info.Arguments=$Arguments; $info.UseShellExecute=$false
+    $info.CreateNoWindow=$true; $info.RedirectStandardOutput=$true; $info.RedirectStandardError=$true
+    $process = [Diagnostics.Process]::Start($info)
+    try {
+        $outputTask=$process.StandardOutput.ReadToEndAsync()
+        $errorTask=$process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($TimeoutMs)) {
+            $process.Kill()
+            $process.WaitForExit()
+            throw 'Physical DNS/HTTPS probe timed out before network takeover'
+        }
+        [IO.File]::WriteAllText($OutputPath, $outputTask.GetAwaiter().GetResult())
+        [IO.File]::WriteAllText($ErrorPath, $errorTask.GetAwaiter().GetResult())
+        return $process.ExitCode
+    } finally { $process.Dispose() }
+}
+
 function Test-PhysicalForwarding($Adapter, [string[]]$Upstream, [string]$Supplement) {
     $arguments = '--interface "' + $Adapter.Name + '" --dns ' + ($Upstream -join ',') + ' --ipv6-dns ' + $Supplement + ' --probe https://www.microsoft.com/'
     if (Test-Path (Join-Path (Split-Path $Marker) 'allow-ipv4-fallback.flag')) { $arguments += ' --allow-ipv4-fallback' }
-    $probe = Start-Process -FilePath (Join-Path $CoreDir 'v6core.exe') -ArgumentList $arguments -WorkingDirectory $CoreDir -WindowStyle Hidden -PassThru `
-        -RedirectStandardOutput (Join-Path (Split-Path $Marker) 'preflight.json') -RedirectStandardError (Join-Path (Split-Path $Marker) 'preflight-error.log')
-    try {
-        if (-not $probe.WaitForExit(15000)) { $probe.Kill(); throw 'Physical DNS/HTTPS probe timed out before network takeover' }
-        if ($probe.ExitCode -ne 0) { throw 'Physical DNS/HTTPS probe failed before network takeover; see preflight-error.log' }
-    } finally { $probe.Dispose() }
+    $exitCode = Invoke-BoundedProcess (Join-Path $CoreDir 'v6core.exe') $arguments `
+        (Join-Path (Split-Path $Marker) 'preflight.json') (Join-Path (Split-Path $Marker) 'preflight-error.log')
+    if ($exitCode -ne 0) { throw "Physical DNS/HTTPS probe failed ($exitCode) before network takeover; see preflight-error.log" }
+
 }
 
 function Start-V6Core($Adapter) {
@@ -152,6 +171,8 @@ function Start-V6Core($Adapter) {
     if (Test-Path (Join-Path (Split-Path $Marker) 'allow-ipv4-fallback.flag')) { $args += ' --allow-ipv4-fallback' }
     $process = Start-Process -FilePath (Join-Path $CoreDir 'v6core.exe') -ArgumentList $args -WorkingDirectory $CoreDir -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path (Split-Path $Marker) 'core.log') -RedirectStandardError (Join-Path (Split-Path $Marker) 'core-error.log')
+    $null = $process.Handle
+    if ($process.HasExited) { throw 'Forwarding core exited before process state capture; see core-error.log' }
     @{Pid=$process.Id;StartTicks=$process.StartTime.ToUniversalTime().Ticks;NetworkSignature=(Get-PhysicalNetworkSignature $Adapter)} | ConvertTo-Json | Set-Content $CoreState
     for ($i=0; $i -lt 40; $i++) {
         if (Test-Path $CoreReady) { break }
