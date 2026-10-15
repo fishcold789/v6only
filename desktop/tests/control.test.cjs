@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 
-async function desktop({installed = false, enabled = false, installError, flows = [], statusError = null} = {}) {
+async function desktop({installed = false, enabled = false, installError, flows = [], statusError = null, busyFailures = 0} = {}) {
   const elements = new Map(), calls = [];
   function element(id) {
     if (!elements.has(id)) elements.set(id, {
@@ -25,12 +25,13 @@ async function desktop({installed = false, enabled = false, installError, flows 
       }
       if (!installed) throw Error('SERVICE_MISSING: Service not installed');
       if (args.action === 'status' && statusError) throw Error(statusError);
+      if (args.action === 'enable' && busyFailures-- > 0) throw Error('SERVICE_BUSY: watcher running');
       if (args.action === 'enable') enabled = true;
       if (args.action === 'disable') enabled = false;
       if (args.action === 'status') return {installed, enabled, health: {}, flows};
       return {};
     }}}},
-    setInterval() {},
+    setInterval() {}, setTimeout: callback => setImmediate(callback),
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../ui/app.js'), 'utf8'), context);
   for (let i = 0; i < 10 && vm.runInContext('polling', context); i++) await new Promise(setImmediate);
@@ -126,4 +127,13 @@ test('IPv4 fallback is an explicit service action and off by default', async () 
   app.element('allow-fallback').checked = true;
   await app.fallback();
   assert.deepEqual(app.calls[0], ['service','set_fallback']);
+});
+
+
+test('One click waits for a busy watcher and enables without a second click', async () => {
+  const app=await desktop({installed:true,busyFailures:1});
+  await app.click();
+  assert.equal(app.calls.filter(([,a])=>a==='enable').length,2);
+  assert.equal(app.element('control').textContent,'关闭转发');
+  assert.equal(app.element('notice').textContent,'');
 });
