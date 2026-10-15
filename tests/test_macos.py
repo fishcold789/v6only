@@ -314,4 +314,22 @@ class MacOSControllerTests(unittest.TestCase):
         self.assertFalse((self.base/'state/fake-core').exists())
         self.assertTrue((self.base/'state/original').exists())
 
+class ConnectivityTests(unittest.TestCase):
+    def test_independent_https_origins(self):
+        for mode, expected in [('first', 0), ('second', 0), ('none', 1)]:
+            script = f"""STATE_DIR=/nonexistent
+source '{ROOT}/macos/v6-runtime.sh'
+log() {{ :; }}
+curl() {{
+ case "$*" in
+  *127.0.0.1*) printf '%s' '{{"data_path_verified":true}}'; return 0;;
+  *bilibili*) [[ {mode} == first ]];;
+  *microsoft*) [[ {mode} == second ]];;
+ esac
+}}
+validate_forwarding
+"""
+            result = subprocess.run(['bash', '-c', script], capture_output=True)
+            self.assertEqual(result.returncode, expected, result.stderr.decode())
+
 if __name__ == '__main__': unittest.main()
