@@ -123,6 +123,17 @@ function Wait-ForwardingAdapter([string]$Name) {
     throw "Forwarding adapter $Name is unavailable after driver start"
 }
 
+function Test-PhysicalForwarding($Adapter, [string[]]$Upstream, [string]$Supplement) {
+    $arguments = '--interface "' + $Adapter.Name + '" --dns ' + ($Upstream -join ',') + ' --ipv6-dns ' + $Supplement + ' --probe https://www.microsoft.com/'
+    if (Test-Path (Join-Path (Split-Path $Marker) 'allow-ipv4-fallback.flag')) { $arguments += ' --allow-ipv4-fallback' }
+    $probe = Start-Process -FilePath (Join-Path $CoreDir 'v6core.exe') -ArgumentList $arguments -WorkingDirectory $CoreDir -WindowStyle Hidden -PassThru `
+        -RedirectStandardOutput (Join-Path (Split-Path $Marker) 'preflight.json') -RedirectStandardError (Join-Path (Split-Path $Marker) 'preflight-error.log')
+    try {
+        if (-not $probe.WaitForExit(15000)) { $probe.Kill(); throw 'Physical DNS/HTTPS probe timed out before network takeover' }
+        if ($probe.ExitCode -ne 0) { throw 'Physical DNS/HTTPS probe failed before network takeover; see preflight-error.log' }
+    } finally { $probe.Dispose() }
+}
+
 function Start-V6Core($Adapter) {
     if (Test-CoreActive) { return }
     foreach ($file in @('v6core.exe','wintun.dll')) {
@@ -135,6 +146,7 @@ function Start-V6Core($Adapter) {
         if (-not $upstream) { $upstream = @('223.5.5.5','223.6.6.6') }
         $supplement='223.5.5.5,223.6.6.6'
         if(Get-NetIPAddress -InterfaceIndex $Adapter.ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue|Where-Object IPAddress -Match '^[23][0-9a-fA-F]{3}:'){$supplement='2400:3200::1,2400:3200:baba::1,223.5.5.5,223.6.6.6'}
+        Test-PhysicalForwarding $Adapter $upstream $supplement
         $args = '--interface "' + $Adapter.Name + '" --device v6only-tun --dns ' + ($upstream -join ',') + ' --ipv6-dns ' + $supplement + ' --chatgpt-ipv4 --stats-db "' + (Join-Path (Split-Path $Marker) 'traffic.sqlite') + '" --ready "' + $CoreReady + '"'
     }
     if (Test-Path (Join-Path (Split-Path $Marker) 'allow-ipv4-fallback.flag')) { $args += ' --allow-ipv4-fallback' }

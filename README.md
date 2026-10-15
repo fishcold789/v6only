@@ -1,6 +1,6 @@
 # V6Only
 
-2.1.7：修复 Windows DNS 快照污染及关闭清理，补齐三端网络变化和核心异常恢复；默认严格 IPv6，可手动开启 IPv4 回退。详情见 [网络恢复说明](docs/network-recovery.md)。macOS 继续支持 [网易云音频 IPv6](docs/netease-ipv6.md)。
+2.1.9：修复 Windows DNS 快照污染及关闭清理，补齐三端网络变化和核心异常恢复；默认严格 IPv6，可手动开启 IPv4 回退。详情见 [网络恢复说明](docs/network-recovery.md)。macOS 继续支持 [网易云音频 IPv6](docs/netease-ipv6.md)。
 
 IPv6 转发与流量记录工具，提供 macOS、Android 和 Windows 桌面/移动应用。
 
@@ -18,7 +18,7 @@ IPv6 转发与流量记录工具，提供 macOS、Android 和 Windows 桌面/移
 
 默认情况下，目标有 AAAA 地址时只连接 IPv6，不因连接失败而回退 IPv4；成功确认没有 AAAA 的目标允许 IPv4。手动打开回退开关后，IPv6 连接失败才尝试 IPv4，并显示回退原因；可能产生 IPv4 计费流量。公共 DNS 补充查询用于解决部分网络 DNS 隐藏视频 CDN 的 IPv6 地址问题。2.1.1 起，网络 DNS 已成功确认无 AAAA 时，补充查询最多等待 1 秒，公共 DNS 故障不再丢弃有效答案；两组 DNS 都失败仍报错。2.1.2 的 Windows、Android 和 macOS 启动配置同时保留 IPv4/IPv6 补充 DNS，并行查询 TCP/UDP，补充查询预算为 1.5 秒，容纳约 1 秒的 TCP 重传，同时避免某一 DNS 传输通道超时或提前返回空答案造成视频误走 IPv4；视频本身仍按 AAAA 结果走 IPv6。网络本身需要具备可用 IPv6，工具不能让只有 IPv4 的远端服务器凭空支持 IPv6。
 
-ChatGPT / OpenAI 相关域名保持 IPv4。当前 macOS 版本保留原有 127.0.0.1:7890 HTTP 代理例外；Android 和 Windows 使用直接 IPv4 例外。工具不会提供额外的跨地区代理服务。其他 VPN、加密代理、ECH 或无法识别域名的连接有相应限制，详见平台说明。
+macOS 保留现有的 7890 本机 HTTP 代理，支持 IPv4/IPv6 回环；代理的公网出口由原代理决定。Android 和 Windows 对 ChatGPT / OpenAI 使用直接 IPv4 例外。工具不会提供额外的跨地区代理服务。其他 VPN、加密代理、ECH 或无法识别域名的连接有相应限制，详见平台说明。
 
 流量记录为经过核心的实际套接字字节，按 IPv4/IPv6 和上传/下载拆分。SQLite 历史在停止连接后保留；自定义时间范围为左闭右开。记录不含 IP/链路层报头和重传，不能直接当作运营商或校园计费账单。
 

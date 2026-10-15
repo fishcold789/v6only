@@ -31,7 +31,7 @@ func run() error {
 	dns := flag.String("dns", "202.112.128.50,202.112.128.51", "physical DNS IPs, comma-separated")
 	allowFallback := flag.Bool("allow-ipv4-fallback", false, "explicitly allow IPv4 after IPv6 connection failure")
 	chatIPv4 := flag.Bool("chatgpt-ipv4", false, "keep ChatGPT connections on IPv4")
-	chatProxy := flag.String("chatgpt-proxy", "", "ChatGPT IPv4 local HTTP proxy exception")
+	chatProxy := flag.String("chatgpt-proxy", "", "ChatGPT local HTTP proxy (numeric IPv4 or IPv6 loopback)")
 	ipv6DNS := flag.String("ipv6-dns", "", "IPv6 DNS servers for global AAAA lookups; campus domains retain campus DNS")
 	neteaseIPv6 := flag.Bool("netease-ipv6", false, "use verified official IPv6 CDN aliases for NetEase m701/m801 audio")
 	dev := flag.String("device", "", "TUN name; empty for proxy/probe only")

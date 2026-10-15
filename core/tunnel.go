@@ -209,7 +209,7 @@ func (r *Router) udp(c adapter.UDPConn) {
 // Retry the initial datagram only while establishing a flow, never race v4 with v6.
 func (r *Router) OpenUDP(ctx context.Context, host, port string, first []byte) (net.Conn, []byte, error) {
 	if (r.cfg.ChatGPTProxy != "" || r.cfg.ChatGPTIPv4) && isChatGPT(host) {
-		return nil, nil, fmt.Errorf("ChatGPT uses TCP through its IPv4 proxy")
+		return nil, nil, fmt.Errorf("ChatGPT requires TCP; UDP cannot bypass its configured proxy policy")
 	}
 	result, e := r.addresses(ctx, host)
 	if e != nil {

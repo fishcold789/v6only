@@ -81,7 +81,8 @@ stop_core() {
     rm -f "$CORE_READY" "$STATE_DIR/core.plist" "$STATE_DIR/core.network"
 }
 start_core() {
-    local dev _attempt
+    local dev _attempt chat_proxy=127.0.0.1:7890
+    if local_proxy_active; then chat_proxy=$(local_proxy_endpoint); fi
     core_active && core_network_matches && return 0
     [[ -x "$V6_DIR/v6core" ]] || die '缺少 v6core 二进制，请先运行 macos/build.sh。'
     stop_core
@@ -93,7 +94,7 @@ start_core() {
 <key>ProgramArguments</key><array>
 <string>$V6_DIR/v6core</string><string>--interface</string><string>$IFACE</string>
 <string>--dns</string><string>202.112.128.50,202.112.128.51</string>
-<string>--chatgpt-proxy</string><string>127.0.0.1:7890</string>
+<string>--chatgpt-proxy</string><string>$chat_proxy</string>
 <string>--ipv6-dns</string><string>2400:3200::1,2400:3200:baba::1,223.5.5.5,223.6.6.6</string>
 <string>--netease-ipv6</string>
 $(if [[ -f "$STATE_DIR/allow-ipv4-fallback.flag" ]]; then printf '<string>--allow-ipv4-fallback</string>'; fi)

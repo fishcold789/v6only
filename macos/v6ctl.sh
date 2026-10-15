@@ -176,10 +176,12 @@ on() {
         printf '%s\n' "$PORTAL_HOST" >> "$STATE_DIR/bypass.expected"
     fi
     start_core
-    for kind in webproxy securewebproxy socksfirewallproxy; do networksetup -set"$kind"state "$SERVICE" off; done
-    touch "$STATE_DIR/proxy.managed"
-    networksetup -setautoproxyurl "$SERVICE" "$PAC_URL"
-    networksetup -setautoproxystate "$SERVICE" on
+    if ! local_proxy_active; then
+        for kind in webproxy securewebproxy socksfirewallproxy; do networksetup -set"$kind"state "$SERVICE" off; done
+        touch "$STATE_DIR/proxy.managed"
+        networksetup -setautoproxyurl "$SERVICE" "$PAC_URL"
+        networksetup -setautoproxystate "$SERVICE" on
+    fi
     networksetup -setdnsservers "$SERVICE" "${DNS_SERVERS[@]}"
     set_bypass_file "$STATE_DIR/bypass.expected"
     if [[ ! -d "$RESOLVER_DIR" ]]; then mkdir -m 755 "$RESOLVER_DIR"; fi

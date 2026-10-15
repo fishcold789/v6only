@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 
-async function desktop({installed = false, enabled = false, installError, flows = [], statusError = null, busyFailures = 0} = {}) {
+async function desktop({installed = false, enabled = false, installError, flows = [], statusError = null, busyFailures = 0, version = '2.1.9'} = {}) {
   const elements = new Map(), calls = [];
   function element(id) {
     if (!elements.has(id)) elements.set(id, {
@@ -21,6 +21,7 @@ async function desktop({installed = false, enabled = false, installError, flows 
         assert.equal(element('control').disabled, true, 'disable button during installation');
         if (installError) throw Error(installError);
         installed = true;
+        version = '2.1.9';
         return {installed, enabled};
       }
       if (!installed) throw Error('SERVICE_MISSING: Service not installed');
@@ -28,7 +29,7 @@ async function desktop({installed = false, enabled = false, installError, flows 
       if (args.action === 'enable' && busyFailures-- > 0) throw Error('SERVICE_BUSY: watcher running');
       if (args.action === 'enable') enabled = true;
       if (args.action === 'disable') enabled = false;
-      if (args.action === 'status') return {installed, enabled, health: {}, flows};
+      if (args.action === 'status') return {installed, enabled, health: {}, flows,version};
       return {};
     }}}},
     setInterval() {}, setTimeout: callback => setImmediate(callback),
@@ -136,4 +137,32 @@ test('One click waits for a busy watcher and enables without a second click', as
   assert.equal(app.calls.filter(([,a])=>a==='enable').length,2);
   assert.equal(app.element('control').textContent,'关闭转发');
   assert.equal(app.element('notice').textContent,'');
+});
+
+test('Proxy labels distinguish IPv6 and IPv4 loopback without claiming public egress', async () => {
+  for (const [network,label] of [['tcp6_proxy','IPv6 本机代理'],['tcp4_proxy','IPv4 本机代理']]) {
+    const app = await desktop({installed:true, enabled:true, flows:[{host:'chatgpt.com',remote:network==='tcp6_proxy'?'[::1]:7890':'127.0.0.1:7890',network,reason:'chatgpt_proxy'}]});
+    assert.equal(app.element('flows-body').children[0].children[2].children[0].textContent,label);
+  }
+});
+
+
+test('An outdated service is upgraded without toggling forwarding off', async () => {
+ const app = await desktop({installed:true, enabled:true, version:'2.1.6'});
+ assert.equal(app.element('control').textContent,'更新后台服务');
+ await app.click();
+ assert.deepEqual(app.calls[0],['install_service',undefined]);
+ assert.ok(!app.calls.some(([,action])=>action==='disable'));
+ assert.equal(app.element('control').textContent,'关闭转发');
+});
+
+
+test('A newer service is not downgraded by this desktop', async () => {
+ const app=await desktop({installed:true,enabled:true,version:'2.2.0'});
+ assert.equal(app.element('control').textContent,'关闭转发');
+});
+
+test('Recent connections are sorted by time instead of old cumulative traffic', async () => {
+ const app=await desktop({installed:true,enabled:true,flows:[{host:'old.example',remote:'127.0.0.1:7890',network:'tcp4_proxy',time:'2026-10-10T10:00:00Z',download_bytes:999999},{host:'chatgpt.com',remote:'[::1]:7890',network:'tcp6_proxy',time:'2026-10-10T11:00:00Z',download_bytes:1}]});
+ assert.equal(app.element('flows-body').children[0].children[0].textContent,'chatgpt.com');
 });

@@ -28,7 +28,7 @@ if name=='networksetup':
     if a[0]=='-setautoproxystate': mutate();s['pac_enabled']='Yes' if a[2]=='on' else 'No';done()
     kind=next((x for x in ['securewebproxy','socksfirewallproxy','webproxy'] if x in a[0]),None)
     if kind:
-        if a[0].startswith('-get'): done('Enabled: '+s.get('proxies',{}).get(kind,'No'))
+        if a[0].startswith('-get'): done('Enabled: '+s.get('proxies',{}).get(kind,'No')+'\nServer: '+s.get('proxy_host','')+'\nPort: '+str(s.get('proxy_port',0)))
         mutate();s.setdefault('proxies',{})[kind]='Yes' if a[2]=='on' else 'No';done()
     key='dns' if 'dnsservers' in a[0] else 'bypass'
     if a[0].startswith('-get'):
@@ -99,6 +99,19 @@ class MacOSControllerTests(unittest.TestCase):
 
     def test_disabled_pac_remains_disabled_after_restore(self):
         self.on();self.off();self.assertEqual(self.read()['pac_enabled'],'No')
+
+    def test_airport_ipv6_proxy_preserved_on_activation_and_watch(self):
+        s=self.read();s.update(proxy_host='::1',proxy_port=7890,proxies={k:'Yes' for k in ['webproxy','securewebproxy','socksfirewallproxy']});self.save(s)
+        self.on();before=len(self.read()['writes'])
+        self.script('watch_once; watch_once',source='v6-watch.sh')
+        self.assertEqual(len(self.read()['writes']),before)
+        self.assertEqual(set(self.read()['proxies'].values()),{'Yes'})
+        self.off();self.assertEqual(set(self.read()['proxies'].values()),{'Yes'})
+
+    def test_airport_can_replace_pac_without_watch_fighting_it(self):
+        self.on();s=self.read();s.update(proxy_host='::1',proxy_port=7890,pac_enabled='No',proxies={k:'Yes' for k in ['webproxy','securewebproxy','socksfirewallproxy']});self.save(s)
+        before=len(s['writes']);self.script('watch_once; watch_once',source='v6-watch.sh')
+        self.assertEqual(len(self.read()['writes']),before)
 
     def test_system_proxy_paused_and_restored(self):
         s=self.read();s['proxies']={'webproxy':'Yes','securewebproxy':'Yes','socksfirewallproxy':'Yes'};self.save(s)

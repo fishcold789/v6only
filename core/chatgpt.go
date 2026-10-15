@@ -23,19 +23,24 @@ func isChatGPT(host string) bool {
 	return false
 }
 
-// The local proxy keeps its existing IPv4 upstream. This socket deliberately
-// uses loopback, without binding to en0 or counting it as physical traffic.
+// The proxy endpoint determines the loopback transport family. Its public
+// upstream is separate and must not be inferred from this local socket.
+// Do not bind loopback to en0 or count it as physical traffic.
 func (r *Router) dialChatGPT(ctx context.Context, host, port string) (net.Conn, error) {
 	address, p, e := net.SplitHostPort(r.cfg.ChatGPTProxy)
 	ip := net.ParseIP(address)
-	if e != nil || ip == nil || ip.To4() == nil || !ip.IsLoopback() || p == "" {
-		return nil, fmt.Errorf("ChatGPT proxy must be an IPv4 loopback endpoint")
+	if e != nil || ip == nil || !ip.IsLoopback() || p == "" {
+		return nil, fmt.Errorf("ChatGPT proxy must be a numeric loopback endpoint")
 	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	network := "tcp6"
+	if ip.To4() != nil {
+		network = "tcp4"
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	c, e := (&net.Dialer{}).DialContext(ctx, "tcp4", r.cfg.ChatGPTProxy)
+	c, e := (&net.Dialer{}).DialContext(ctx, network, r.cfg.ChatGPTProxy)
 	if e != nil {
-		return nil, fmt.Errorf("ChatGPT IPv4 proxy unavailable: %w", e)
+		return nil, fmt.Errorf("ChatGPT proxy unavailable: %w", e)
 	}
 	deadline, _ := ctx.Deadline()
 	c.SetDeadline(deadline)
@@ -57,9 +62,9 @@ func (r *Router) dialChatGPT(ctx context.Context, host, port string) (net.Conn, 
 	}
 	c.SetDeadline(time.Time{})
 	// Retain any bytes arriving with the CONNECT response; count only this
-	// diagnostic flow. The proxy's physical connection is counted by the TUN.
+	// diagnostic flow. The external proxy owns its public connection and counters.
 	conn := &countingConn{Conn: &bufferedConn{c, reader}}
-	r.record(host, conn, "tcp4_proxy", "chatgpt_ipv4_proxy")
+	r.record(host, conn, network+"_proxy", "chatgpt_proxy")
 	return conn, nil
 }
 

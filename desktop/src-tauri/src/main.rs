@@ -57,7 +57,8 @@ async fn install_service(app:tauri::AppHandle)->Result<Value,String>{
  let uid=Command::new("/usr/bin/id").arg("-u").output().map_err(|e|e.to_string())?;
  let uid=String::from_utf8_lossy(&uid.stdout).trim().to_string();if uid.parse::<u32>().is_err(){return Err("无法确定用户".into())};
  tauri::async_runtime::spawn_blocking(move||{
- let cmd=format!("/bin/bash {} {}",shell_quote(&resource.to_string_lossy()),uid);
+ let mode=match rpc(json!({"action":"status"})) { Ok(status) if status["suspended"]==true || status["enabled"]==false => "pause", _ => "enable" };
+ let cmd=format!("/bin/bash {} {} {}",shell_quote(&resource.to_string_lossy()),uid,mode);
  let script=format!("do shell script {} with administrator privileges",serde_json::to_string(&cmd).unwrap());
  let output=Command::new("/usr/bin/osascript").args(["-e",&script]).output().map_err(|e|e.to_string())?;
  if !output.status.success(){return Err(String::from_utf8_lossy(&output.stderr).to_string())};

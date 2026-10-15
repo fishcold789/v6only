@@ -226,7 +226,7 @@ func (r *Router) queryOnce(ctx context.Context, host string, qtype uint16) (*dns
 			return nil, ctx.Err()
 		}
 	}
-	if qtype == dns.TypeAAAA && (r.cfg.ChatGPTProxy != "" || r.cfg.ChatGPTIPv4) && isChatGPT(host) {
+	if qtype == dns.TypeAAAA && r.cfg.ChatGPTProxy == "" && r.cfg.ChatGPTIPv4 && isChatGPT(host) {
 		q := new(dns.Msg)
 		q.SetQuestion(dns.Fqdn(host), qtype)
 		a := new(dns.Msg)
